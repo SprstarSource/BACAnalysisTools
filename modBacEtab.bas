@@ -35,6 +35,17 @@ Private Const FONT_SAFE_NUM As String = "Calibri"
 
 Public gLastBacEtabPath As String
 
+' ---- run status (read by the control panel / main button) ----
+' The status is reported by this module itself: the caller never has to
+' assume that "the macro returned" means "the macro succeeded".
+Private Const ST_NONE As Long = 0       ' no report (the macro did not finish properly)
+Private Const ST_OK As Long = 1         ' finished successfully
+Private Const ST_CANCEL As Long = 2     ' cancelled by the user
+Private Const ST_FAIL As Long = 3       ' failed (reason in mDetail)
+Private mAuto As Boolean                ' automatic mode: no success message
+Private mStatus As Long
+Private mDetail As String
+
 Private mCEtab As Long, mCSerie As Long, mCNom As Long, mCPre As Long
 Private mCDay As Long, mCMon As Long, mCYear As Long, mCSex As Long
 Private mCDesi As Long
@@ -55,6 +66,8 @@ Public Sub Run_BacEtab()
     Dim k As Long, sheetsMade As Long, nCols As Long
     Dim desiName As String, layoutIssues As String
 
+    mStatus = ST_NONE
+    mDetail = ""
     On Error GoTo Failed
     oldScreen = Application.ScreenUpdating
     oldEvents = Application.EnableEvents
@@ -142,7 +155,8 @@ Public Sub Run_BacEtab()
 
     target.CheckCompatibility = False
     target.SaveAs fileName:=outputPath, FileFormat:=xlOpenXMLWorkbook, CreateBackup:=False
-     gLastBacEtabPath = outputPath
+    If Not FileExists(outputPath) Then Err.Raise vbObjectError + 905, "modBacEtab", Ar("save_chk") & vbLf & outputPath
+    gLastBacEtabPath = outputPath
     savedTarget = True
 
 Finished:
@@ -156,25 +170,54 @@ Finished:
         Application.ScreenUpdating = oldScreen
     End If
     On Error GoTo 0
-    If cancelled Then Exit Sub
+    If cancelled Then
+        mStatus = ST_CANCEL
+        mDetail = Ar("st_cancel")
+        Exit Sub
+    End If
     If Failed Then
-        MsgBox Ar("failed") & vbLf & errText, vbCritical + vbMsgBoxRight + vbMsgBoxRtlReading, Ar("app_title")
+        mStatus = ST_FAIL
+        mDetail = errText
+        If Not mAuto Then
+            MsgBox Ar("failed") & vbLf & errText, vbCritical + vbMsgBoxRight + vbMsgBoxRtlReading, Ar("app_title")
+        End If
     Else
-        summary = Ar("done") & vbLf & outputPath & vbLf & _
-                  Ar("sheets") & ": " & sheetsMade & vbLf & Ar("pupils") & ": " & total & vbLf
-        For k = 1 To 9
-            If cnt(k) > 0 Then summary = summary & vbLf & SeriesSheetName(k) & " : " & cnt(k)
-        Next k
-        If Len(mFontNotes) > 0 Then summary = summary & vbLf & vbLf & Ar("fonts") & mFontNotes
-        If Len(layoutIssues) > 0 Then summary = summary & vbLf & vbLf & Ar("layout_warn") & layoutIssues
-        MsgBox summary, vbInformation + vbMsgBoxRight + vbMsgBoxRtlReading, Ar("app_title")
+        mStatus = ST_OK
+        mDetail = outputPath & vbLf & Ar("sheets") & ": " & sheetsMade & "  |  " & Ar("pupils") & ": " & total
+        If Len(layoutIssues) > 0 Then mDetail = mDetail & vbLf & Ar("layout_warn") & layoutIssues
+        If Not mAuto Then       ' automatic mode: the main button shows ONE final report
+            summary = Ar("done") & vbLf & outputPath & vbLf & _
+                      Ar("sheets") & ": " & sheetsMade & vbLf & Ar("pupils") & ": " & total & vbLf
+            For k = 1 To 9
+                If cnt(k) > 0 Then summary = summary & vbLf & SeriesSheetName(k) & " : " & cnt(k)
+            Next k
+            If Len(mFontNotes) > 0 Then summary = summary & vbLf & vbLf & Ar("fonts") & mFontNotes
+            If Len(layoutIssues) > 0 Then summary = summary & vbLf & vbLf & Ar("layout_warn") & layoutIssues
+            MsgBox summary, vbInformation + vbMsgBoxRight + vbMsgBoxRtlReading, Ar("app_title")
+        End If
     End If
     Exit Sub
 Failed:
     Failed = True
     errText = Err.Description
+    If Len(errText) = 0 Then errText = "#" & CStr(Err.Number)
     Resume Finished
 End Sub
+
+' ---------------------------------------------------------------------
+'  Status API (used by modBuildBacPanel)
+' ---------------------------------------------------------------------
+Public Sub BacEtab_SetAuto(ByVal v As Boolean)
+    mAuto = v
+End Sub
+
+Public Function BacEtab_LastStatus() As Long
+    BacEtab_LastStatus = mStatus
+End Function
+
+Public Function BacEtab_LastDetail() As String
+    BacEtab_LastDetail = mDetail
+End Function
 
 ' ---------------------------------------------------------------------
 '  Input dialog
@@ -982,6 +1025,9 @@ Private Function Ar(ByVal key As String) As String
     Case "done": Ar = ArHex("62A 645 20 625 646 634 627 621 20 627 644 645 644 641 3A")
     Case "sheets": Ar = ArHex("639 62F 62F 20 627 644 623 648 631 627 642")
     Case "pupils": Ar = ArHex("639 62F 62F 20 627 644 62A 644 627 645 64A 630")
+    Case "save_chk": Ar = ArHex("62A 639 630 651 631 20 627 644 62A 62D 642 642 20 645 646 20 648 62C 648 62F 20 645 644 641 20 627 644 646 62A 627 626 62C 20 628 639 62F")
+        Ar = Ar & ArHex("20 627 644 62D 641 638 3A")
+    Case "st_cancel": Ar = ArHex("623 644 63A 649 20 627 644 645 633 62A 62E 62F 645 20 627 644 639 645 644 64A 629 2E")
     Case "failed": Ar = ArHex("62A 639 630 631 20 625 646 634 627 621 20 627 644 645 644 641 3A")
     Case "fonts": Ar = ArHex("62A 645 20 627 633 62A 628 62F 627 644 20 62E 637 648 637 20 63A 64A 631 20 645 62A 648 641 631 629 20 628 62E 637 648 637 20 628 62F 64A 644 629 3A")
     Case "title_main": Ar = ArHex("646 62A 627 626 62C 20 634 647 627 62F 629 20 627 644 628 643 627 644 648 631 64A 627")
