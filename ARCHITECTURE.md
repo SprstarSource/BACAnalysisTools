@@ -1,168 +1,1210 @@
-# Architecture
+# BACAnalysisTools
+# Software Architecture and Technical Design
 
-This document records how **BACAnalysisTools** is organised, which design decisions shaped it, and what each decision costs. It is meant for maintainers and reviewers.
+## 1. DOCUMENT PURPOSE
 
-**What the tool does.** A school-level Excel/VBA toolkit for the Baccalaureate (BAC): it extracts one school's results from the national results export, optionally fills in each pupil's repeater status from the third-term results, and produces an analysis workbook (per-series statistics plus a school summary).
+This document describes the architecture of BACAnalysisTools, its processing components, the contracts between them, the design decisions behind the implementation, and the operational constraints that maintainers must preserve.
 
-**Basis.** Written from the source on the `main` branch (one commit): `modBacEtab`, `modRepeatStatus`, `modBacAnalysis` and `modBuildBacPanel` were read in full (the end of `modBacEtab` is only its Arabic text table). `frmEtabCode` and the binary `BacTools.xlsm` were **not** inspected; what is said about the form comes from how `modBacEtab` calls it.
+It is intended for developers, maintainers, and reviewers.
 
-## Contents
+The companion README.md explains the project's purpose, installation, and usage. This document focuses on internal structure and behaviour.
 
-1. [Overview](#1-overview)
-2. [Components](#2-components)
-3. [The extraction workbook: the contract between steps](#3-the-extraction-workbook-the-contract-between-steps)
-4. [Decisions](#4-decisions)
-5. [Known limitations and risks](#5-known-limitations-and-risks)
-6. [Rules for maintainers](#6-rules-for-maintainers)
-7. [Appendix: series table](#7-appendix-series-table)
+### Documentation Basis
+
+This architecture reflects the project design, implementation changes, and Excel tests confirmed by the project owner.
+
+Exact implementation details that have not been independently re-inspected in the current VBA source are identified as contracts or behaviours to preserve, rather than claims about internal code mechanics.
 
 ---
 
-## 1. Overview
+## 2. SYSTEM OVERVIEW
 
-```
-                    ControlPanel (modBuildBacPanel)
-        ┌──────────────────┬──────────────────┬──────────────────┐
-        ▼                  ▼                  ▼
-  [1] Extract         [2] Repeat status    [3] Analyse
-  RunBacStep1         RunBacRepeat         RunBacStep2
-  Run_BacEtab         Run_RepeatStatus     Run_BacAnalysis
-        │                  │                  │
- BAC<year>Resultats        │ reads            │ reads a COPY of
- Original.xlsx             │ 3rd-term results │ the extraction file
- (national export)         │ workbook         │
-        │                  │                  │
-        ▼                  ▼                  ▼
-  extraction workbook ◄── column E ──   "<prefix> <name>.xlsx"
-  (one sheet per series)   (backup first)     (Gen sheet + 3 tables per series)
-        └──── path shared through modBacEtab.gLastBacEtabPath ────┘
-```
+BACAnalysisTools is an Excel/VBA toolkit for processing Baccalaureate (BAC) results at school level.
 
-The three steps are separate macros. They are connected only by **a workbook**: the extraction file written by step 1, which steps 2 and 3 read or modify. The panel does not enforce an order (see D3).
+It performs three main operations:
 
-## 2. Components
+1. Extracts the candidates belonging to one school from the provincial BAC results workbook.
+2. Retrieves their repeat status from the school's third-term results.
+3. Generates a statistical analysis workbook containing individual series analysis and a consolidated school summary.
 
-| File | Entry point | Responsibility |
-| :--- | :--- | :--- |
-| `modBuildBacPanel.bas` | `BuildBacPanel`, `RunBacStep1`, `RunBacRepeat`, `RunBacStep2` | Builds the `ControlPanel` sheet (header, card, three buttons, status bar) and routes each button to a macro with `Application.Run`. A module-level `m_Busy` flag blocks re-entry. |
-| `modBacEtab.bas` | `Run_BacEtab` | Finds the newest `BAC????ResultatsOriginal.xlsx` next to the tool, asks for the establishment code, reads the `Data` sheet into memory, splits the school's pupils into one sheet per series, formats them and saves a new workbook. Publishes the saved path in `gLastBacEtabPath`. |
-| `frmEtabCode.frm` (+ `frmEtabCode_code.txt`) | `Setup`, `Accepted`, `codeText` | Input form for the establishment code. `modBacEtab` falls back to `Application.InputBox` if the form cannot be created. |
-| `modRepeatStatus.bas` | `Run_RepeatStatus` | Reads the third-term results workbook, matches pupils by sheet code, normalised name and date of birth, and writes the repeat flag into column E of the extraction workbook. |
-| `modBacAnalysis.bas` | `Run_BacAnalysis` | Copies the extraction workbook, adds statistics under each series table and a `Gen` summary sheet, then freezes the generated formulas as values. |
-| `BacTools.xlsm` | | The macro workbook that holds the modules and the panel. |
+The system consists of three independently executable processing modules and a central orchestration layer.
 
-## 3. The extraction workbook: the contract between steps
+### 2.1 Processing Pipeline
 
-Steps 2 and 3 do not call step 1's code. They rely on the **layout** it produces. Any change to this layout must be made in all three modules.
+The complete workflow follows this sequence:
 
-| Item | Value |
-| :--- | :--- |
-| Sheets | One per series present for the school: `Philo`, `LaEtr`, `GeEc`, `SE`, `Math`, `TGM`, `TGE`, `TGC`, `TGP` (see the [appendix](#7-appendix-series-table)). |
-| Row 1 | Banner: title with the year, and the branch name. The year is read back from `B1` (last four characters) by the analysis. |
-| Row 2 | Header row. |
-| Rows 3 and below | One pupil per row, sorted by average, highest first; column A numbers them 1..n. |
-| Columns A to E | Number, name, birth date (text `yyyy-mm-dd`), sex (1 = male, 2 = female), repeater flag (text; the "yes" word is `نعم`). |
-| Column F | Physical education (EPS). |
-| Columns G onwards | One column per subject of the series, in the series' own order. |
-| Last two columns | `Moyenne` (the average used everywhere) and `MoyenneMe` (the second average, "الأساسية"). |
-| Table | Each sheet holds a table named `T_<sheet name>` that starts at the header row. |
+STAGE 1
+Extract School Results
+Run_BacEtab
+        |
+        v
+STAGE 2
+Fetch Repeat Status
+Run_RepeatStatus
+        |
+        v
+STAGE 3
+Analyse School Results
+Run_BacAnalysis
+        |
+        v
+Analysis Workbook
+Gen Summary Sheet
 
-Who depends on what:
 
-- `modBacAnalysis` assumes header row 2, first subject column F, sex in D, repeater in E, and the average at `nCols - 1`, where `nCols` is the width of the table.
-- `modRepeatStatus` assumes first data row 3, name in B, birth date in C, repeater in E, and sheet names equal to the series codes.
-- Both skip the sheet named `Gen`.
+### 2.2 Execution Philosophy
 
-## 4. Decisions
+The architecture combines two principles:
 
-### D1. Pupils are selected by establishment code, from a national export
-- **Decision.** `Run_BacEtab` loads the whole national `Data` sheet into one array and keeps only the rows whose `Cd_etab` equals the code typed by the user and whose `Cd_serie` is between 30 and 38. If the code exists only under other series, the user is told so; if it is absent, the dialog is shown again with an error.
-- **Why.** The national file holds every school; the tool is operated by one school at a time.
-- **Consequences.** The file is opened once, read-only, and closed straight after loading. Codes are normalised (Arabic-Indic digits, spaces, bidi marks) and limited to 15 digits so they can be compared as numbers.
+- Independent modules: each processing stage can be executed separately.
+- Centralised orchestration: a master workflow coordinates the three stages in the correct order.
 
-### D2. Source columns are located by header name; subject titles are fixed by series
-- **Decision.** `LoadData` finds each required column by its header (`Cd_etab`, `Cd_serie`, `Nom`, `Prenom`, `Date_jour`, `Date_mois`, `Date_annee`, `Sexe`, `Eps`, `Notef1`..`Notef11`, `Moyenne`, `MoyenneMe`; `Desi` is optional). A missing header stops the run and lists the missing names. The meaning of `Notef1..n`, however, comes from a hard-coded table per series (`NotefHeaderAr`, `SubjectCount`).
-- **Why.** Header lookup survives a reordering of columns in the export; the subject names are not in the export (only `Notef` numbers), so they have to be supplied by the tool.
-- **Consequences.** If the Ministry changes which subject sits at which `Notef` position, the data are still read but labelled with the wrong subject, **without any error**. This is the most important silent-failure risk in the tool (see section 5).
+The modules are not required to depend on one another's internal procedures.
 
-### D3. Three independent macros joined by a file, not by calls
-- **Decision.** Extraction, repeat status and analysis are separate macros. The panel states that all buttons are always active and can be run in any order.
-- **Why.** The steps are run at different moments (the third-term file may only arrive later), and a failure in one must not block the others.
-- **Consequences.** The coupling is the workbook layout (section 3) plus one public variable, `modBacEtab.gLastBacEtabPath`, used as a default by steps 2 and 3. If it is empty or the file is gone, the tool asks for a file (`PickFile`).
-- **Order still matters for the data.** The analysis reads a **copy** of the extraction file made at the moment it runs and freezes its results as values (D6). Running the repeat step **after** the analysis does not update an analysis file that already exists; repeater counts in it come from column E as it was at that time.
+Their integration is based on:
 
-### D4. Repeat status is matched in memory, with a conservative fuzzy rule
-- **Decision.** `Run_RepeatStatus` works in three phases: (1) build the repeat data of every third-secondary sheet in memory, grouped by series code derived from the title in `H1`; (2) match every pupil of the extraction workbook without writing anything; (3) make a timestamped backup (`Backup_RepeatStatus_yyyymmdd_hhnnss`), write column E as **values**, save.
-- **Matching rule.** Same sheet code, same normalised name (alef variants, taa marbuta, diacritics, tatweel and spacing are normalised), same date of birth. A one-letter spelling difference is accepted only if the date of birth matches and **exactly one** candidate exists; duplicates with conflicting values are counted as ambiguous and left unwritten.
-- **Safeguards.** The target is opened first so a read-only file fails early; the source is opened read-only and never modified; `AutomationSecurity` is forced to disable macros while opening files and is restored afterwards; if nothing matched, nothing is written and no backup is made.
-- **Consequences.** Unmatched and ambiguous pupils keep an empty flag, and the final report shows how many fell into each class so the user can check them by hand. The earlier two-file chain (`modBuildRepeatStatus` → `RepeatStatus.xlsx` → `modMatchRepeatStatus`) was replaced by this single module, which removes an intermediate file that could go stale.
+- Defined workbook structures.
+- Explicit input/output contracts.
+- Explicit execution-status reporting.
 
-### D5. Analysis on a copy, with fonts and styles taken from the extraction sheets
-- **Decision.** `Run_BacAnalysis` saves a copy named with the prefix `تحليل نتائج` plus the original file name (sequential suffix `_02`, `_03`, ... if the name exists), opens the copy, and adds content below the data of every series sheet. The original is never modified. The fonts used for new cells are read from existing cells of the first series sheet.
-- **Content per series sheet.** A counters strip (count, males, females, repeaters), then three tables: subject averages with pass counts (by sex, total, rate, highest, lowest, repeaters who passed); statistical indicators (pass rate, mean, median, mode, range, population standard deviation, variance, coefficient of variation); score bands (eight bands from below 7 to 18 and above).
-- **Population rules.** Only pupils with `Moyenne > 0` are analysed (zero means absent). Population statistics are used (`STDEVP`, `VARP`). The Amazigh column is skipped by matching its header text. A subject cell counts only if it is not empty.
-- **`Gen` sheet** (first sheet), seven sections: registered and present pupils per branch; general results; pass rate by sex; pass rate of repeaters; comparison with provincial and national rates (cells left empty for manual entry); previous sessions (years derived from the file's year; manual entry); repeaters by sex.
-- **Consequences.** The analysis is repeatable and non-destructive, and the extraction file stays the single source of truth.
+The master workflow does not replace the individual processing modules. It only coordinates their execution.
 
-### D6. Generated formulas are frozen as values
-- **Decision.** After building, the tool runs `Application.CalculateFull` and then replaces every formula below the data tables, and every formula on `Gen`, with its value. The data rows themselves are left untouched.
-- **Why.** The analysis file is a report that is sent or printed; it should not recalculate, break on a missing function, or change when someone edits a source cell.
-- **Consequences.** The analysis does not update when data change: regenerate it. The formulas are visible only while the run is in progress. The cells meant for manual entry on `Gen` are left empty on purpose.
+### 2.3 Master Workflow Location
 
-### D7. In-memory processing and bulk writes
-- **Decision.** The national sheet is read once into a `Variant` array; per-series data arrays are built, sorted by average (a stable insertion sort on a separate key array) and written to the sheet in one assignment. The repeat matcher keeps its data in arrays of a user-defined type, one set per series.
-- **Why.** Per-cell access to a national-size sheet would be slow.
+The master command:
 
-### D8. Fail safely, restore Excel's state, never overwrite
-- **Decision.** Each macro saves screen updating, events, alerts and the status bar before starting and restores them on every exit path. A failed extraction closes its unsaved workbook; a failed analysis closes and deletes its copy. Output names are never reused: `NewOutputPath`, `NewAnalysisPath` and the backup naming add a sequence number or timestamp. An output name is also treated as taken while a workbook of that name is open.
-- **Naming.** The extraction file is named after the school (`Desi` value, with illegal file-name characters replaced) or, when that field is missing, `BAC<year>_<code>`.
-- **Consequences.** Re-running is always safe; old results stay on disk until the user removes them.
+Process Baccalaureate Results
+معالجة نتائج البكالوريا
 
-### D9. Pure-ASCII source, Arabic built from code points
-- **Decision.** All Arabic text is constructed with `ArHex` / `ArabicText` from hexadecimal code points, so the `.bas` files contain only ASCII.
-- **Why.** The source files do not state a reason. The likely one is that `.bas` files are imported in the system ANSI code page, which corrupts Arabic literals on some machines.
-- **Consequences.** Texts are unreadable in the source. Each module carries its own copy of `ArHex`.
+is hosted in the Term03 data-processing panel.
 
-### D10. Self-contained modules
-- **Decision.** Style helpers (`StyleGrid`, `StyleHead`, `StyleLabel`, `StyleBanner`), the font-detection code and the file helpers are repeated in `modBacEtab` and `modBacAnalysis`; `modRepeatStatus` has its own message and file helpers. The only shared names are `modBacEtab.gLastBacEtabPath` and the entry-point macros.
-- **Why (inferred).** Each step can be imported and run on its own; the panel even tells the user if `modRepeatStatus` was not imported (`msg_missing`).
-- **Consequences.** Repeated code must be kept in step by hand: constants such as colours, number formats (`00.00`, `[=1]%0;%00.00`) and layout sizes are copied between `modBacEtab` and `modBacAnalysis`.
+This is a source-oriented interface decision.
 
-## 5. Known limitations and risks
+The Term03 processing tools and BAC repeat-status processing use the same raw-data directory:
 
-1. **Silent mislabelling if the `Notef` order changes (D2).** Add a sanity check, for example comparing the subject count with the number of non-empty `Notef` columns for each series.
-2. **Hard-coded Arabic keywords.** Series codes are derived from the title in `H1` of the third-term workbook by keyword (for example, mathematics must contain "رياضيات" and not "تقني"). A change in wording stops the repeat step with a "code not found" message.
-3. **Order dependence hidden by "any order" (D3).** The analysis is stale if the repeat step runs later.
-4. **Panel error handling is uneven.** `RunBacRepeat` shows a message if the macro cannot start; `RunBacStep1` and `RunBacStep2` swallow such an error silently and rely on the called macro to report its own errors.
-5. **Windows assumptions.** The panel computes the displayed file name with a hard-coded `\`; other modules use `Application.PathSeparator`.
-6. **Repo hygiene.** The repository has a single commit, no README and no licence file. `BacTools.xlsm` is a binary copy of the modules, so it can drift from the `.bas` files and cannot be reviewed in a diff; check that it contains no pupil data before keeping it in a public repository. The national export `BAC????ResultatsOriginal.xlsx` and the extraction outputs contain personal data and must never be committed.
-7. **Validation scope.** No automated tests were found in the repository.
-8. **Modules not reviewed.** `frmEtabCode` was not read.
+Source03
 
-## 6. Rules for maintainers
+The master command is therefore placed in the panel associated with that shared source.
 
-1. Treat the layout in [section 3](#3-the-extraction-workbook-the-contract-between-steps) as an interface: change it in `modBacEtab`, `modBacAnalysis` and `modRepeatStatus` together.
-2. A new series or a changed subject list must update `SubjectCount`, `NotefHeaderAr`, `SeriesSheetName`, the series names in `modBacAnalysis` (`names` array and `BranchOf`) and the keyword rules in `modRepeatStatus.SheetCodeFromTitle`.
-3. Never write to the source workbooks, never overwrite an existing output; keep the backup-before-write step in `Run_RepeatStatus`.
-4. Compute everything first, touch the target last (D4).
-5. Restore Excel's state on every exit path (D8).
-6. Keep source files ASCII-only (D9).
-7. Keep real data out of the repository: no national exports, extraction or analysis workbooks, no pupil names.
+The individual BAC processing stages remain available for independent execution.
 
-## 7. Appendix: series table
+---
 
-`Cd_serie` in the export maps to a sheet and a subject count; sheet index `k = Cd_serie - 29`.
+## 3. SYSTEM COMPONENTS
 
-| `Cd_serie` | Sheet | Branch | Subject columns |
-| :---: | :--- | :--- | :---: |
-| 30 | `Philo` | Literature and Philosophy | 8 |
-| 31 | `LaEtr` | Foreign Languages | 9 |
-| 32 | `GeEc` | Management and Economics | 11 |
-| 33 | `SE` | Experimental Sciences | 10 |
-| 34 | `Math` | Mathematics | 10 |
-| 35 | `TGM` | Technical Mathematics, Mechanical Engineering | 10 |
-| 36 | `TGE` | Technical Mathematics, Electrical Engineering | 10 |
-| 37 | `TGC` | Technical Mathematics, Civil Engineering | 10 |
-| 38 | `TGP` | Technical Mathematics, Process Engineering | 10 |
+### 3.1 Main Processing Modules
 
-Each sheet also has EPS (column F) before the subjects, and `Moyenne` / `MoyenneMe` after them, so a sheet has `8 + subject count` columns.
+Module: modBacEtab.bas
+
+Entry point:
+Run_BacEtab
+
+Responsibilities:
+
+- Read the provincial BAC results workbook.
+- Identify the selected establishment.
+- Extract candidates belonging to the establishment.
+- Filter supported series.
+- Group candidates by series.
+- Calculate candidate rankings.
+- Generate the school-level extraction workbook.
+- Report the execution status.
+
+
+Module: modStudentRepetitionStatus.bas
+
+Entry point:
+Run_RepeatStatus
+
+Responsibilities:
+
+- Locate and read the third-term results workbook.
+- Identify relevant third-year secondary worksheets.
+- Collect candidate identities and repeat statuses.
+- Normalise names and dates.
+- Match source candidates against the extracted BAC candidates.
+- Transfer valid repeat-status values to column E.
+- Generate a repeat-status report.
+- Protect the target workbook through a temporary backup.
+- Report the execution status.
+
+
+Module: modBacAnalysis.bas
+
+Entry point:
+Run_BacAnalysis
+
+Responsibilities:
+
+- Open the school extraction workbook.
+- Create a separate analysis workbook.
+- Generate individual series analysis.
+- Generate the consolidated Gen worksheet.
+- Calculate statistical indicators.
+- Convert generated formulas into values.
+- Preserve the original extraction workbook.
+- Report the execution status.
+
+
+Module: modBuildBacPanel.bas
+
+Main procedures:
+
+BuildBacPanel
+RunBacAll
+RunStage
+
+Responsibilities:
+
+- Build and maintain the BAC control interface.
+- Provide access to individual processing stages.
+- Provide the master workflow command.
+- Execute the stages sequentially.
+- Read explicit stage statuses.
+- Stop execution after the first unsuccessful stage.
+- Display stage-level status indicators.
+- Produce a consolidated execution report.
+
+
+### 3.2 Optional Establishment-Code Form
+
+File:
+frmEtabCode.frm
+
+Responsibility:
+
+Provide the establishment-code input interface.
+
+If the form is unavailable, the extraction module uses a standard input dialog.
+
+---
+
+## 4. EXTRACTION WORKBOOK CONTRACT
+
+The workbook generated by Stage 1 is the central data contract shared by the repeat-status and analysis modules.
+
+Any modification to its structure must be evaluated against all three processing modules.
+
+### 4.1 Worksheet Organisation
+
+The extraction workbook contains one worksheet for every supported series represented among the school's candidates.
+
+Supported worksheet names:
+
+Philo
+LaEtr
+GeEc
+SE
+Math
+TGM
+TGE
+TGC
+TGP
+
+### 4.2 Worksheet Layout
+
+Row 1:
+Worksheet banner and title information.
+
+Row 2:
+Column headers.
+
+Row 3 onward:
+Candidate records.
+
+Column A:
+Candidate rank.
+
+Column B:
+Full name.
+
+Column C:
+Date of birth.
+
+Column D:
+Sex.
+
+Column E:
+Repeater flag.
+
+Column F:
+Physical Education (Eps).
+
+Columns G onward:
+Subject marks.
+
+Last two columns:
+Moyenne
+MoyenneMe
+
+Sex values:
+
+1 = Male
+2 = Female
+
+Repeater flag:
+
+نعم = Repeater
+
+Date of birth:
+
+Stored in yyyy-mm-dd text format.
+
+Each worksheet contains an Excel table named:
+
+T_<SheetName>
+
+The table begins at the header row.
+
+### 4.3 Consumer Dependencies
+
+modStudentRepetitionStatus:
+
+- Candidate records begin at row 3.
+- Full name is in column B.
+- Date of birth is in column C.
+- Repeat status is written to column E.
+- Worksheet names identify the BAC series.
+
+modBacAnalysis:
+
+- Header row is row 2.
+- Candidate records begin at row 3.
+- Sex is in column D.
+- Repeat status is in column E.
+- Physical Education begins at column F.
+- Subject marks begin at column G.
+- The last two table columns contain the two averages.
+
+Non-series summary worksheets must not be processed as candidate worksheets.
+
+### 4.4 Subject Mapping
+
+The provincial BAC export contains positional subject-mark fields:
+
+Notef1
+Notef2
+...
+Notef11
+
+Their subject meanings depend on the series code.
+
+The extraction module uses a predefined mapping between:
+
+Cd_serie
+Subject positions
+Arabic subject names
+Number of subject columns
+
+This mapping is a critical data-integrity contract.
+
+A change in the Ministry's Notef column order can produce correctly structured but incorrectly labelled subject data if the mapping is not updated.
+
+---
+
+## 5. WORKFLOW ORCHESTRATION
+
+### 5.1 Execution Sequence
+
+The master workflow executes:
+
+1. Run_BacEtab
+2. Run_RepeatStatus
+3. Run_BacAnalysis
+
+The orchestrator must not infer success from the fact that a macro returned control to Excel.
+
+Each stage must publish an explicit execution status.
+
+### 5.2 Stage Status Interfaces
+
+modBacEtab:
+
+BacEtab_SetAuto
+BacEtab_LastStatus
+BacEtab_LastDetail
+
+
+modStudentRepetitionStatus:
+
+RepeatStatus_SetAuto
+RepeatStatus_LastStatus
+RepeatStatus_LastDetail
+
+
+modBacAnalysis:
+
+BacAnalysis_SetAuto
+BacAnalysis_LastStatus
+BacAnalysis_LastDetail
+
+The status interfaces form part of the integration contract between the processing modules and the orchestration module.
+
+### 5.3 Status Model
+
+The common status model consists of:
+
+OK
+Cancelled
+Failed
+
+Meaning:
+
+OK:
+The stage completed successfully.
+
+Cancelled:
+The operation was cancelled.
+
+Failed:
+The stage could not complete successfully.
+
+Missing or invalid status:
+The stage did not provide a valid execution result.
+
+A missing or invalid status must always be treated as failure.
+
+### 5.4 Status Reset and Publication
+
+Every stage must:
+
+1. Reset its previous status at the beginning of a new run.
+2. Execute its processing logic.
+3. Publish a final status.
+4. Publish a meaningful detail message.
+5. Ensure that every exit path reports its actual outcome.
+
+A previous successful status must never be reused after a new execution fails to initialise or execute.
+
+### 5.5 Stop-on-First-Failure Rule
+
+Only an explicit OK status permits the master workflow to continue.
+
+If Stage 1 fails or is cancelled:
+
+- Stop the workflow.
+- Skip Stage 2.
+- Skip Stage 3.
+
+If Stage 2 fails or is cancelled:
+
+- Stop the workflow.
+- Skip Stage 3.
+
+If Stage 3 fails:
+
+- Report the failure.
+- Do not report the complete workflow as successful.
+
+The orchestrator must never continue based on:
+
+- Macro return alone.
+- File timestamps.
+- The existence of an unrelated previous output file.
+- Any indirect assumption of success.
+
+### 5.6 Consolidated Execution Report
+
+The master workflow produces one final report containing:
+
+- Successfully completed stages.
+- The failed or cancelled stage.
+- The reason for failure or cancellation.
+- Stages skipped because execution stopped.
+
+Intermediate success and failure dialogs are suppressed during automatic execution.
+
+The orchestrator displays the consolidated result.
+
+### 5.7 User Interface Status Indicators
+
+The control interface provides:
+
+- A status chip beneath each stage button.
+- A coloured status bar.
+- Updated status after independent stage execution.
+- Updated status after master workflow execution.
+
+The panel is brought to the foreground when the master workflow fails or is cancelled.
+
+A busy flag prevents re-entrant execution.
+
+### 5.8 Automatic and Manual Modes
+
+Automatic mode:
+
+- No unnecessary file-selection prompts.
+- No intermediate success dialogs.
+- Explicit status reporting.
+- Errors returned to the orchestrator.
+- Consolidated final report.
+
+Manual mode:
+
+- Individual stage execution.
+- Normal user interaction.
+- Individual stage reporting.
+
+The same processing logic is used in both modes.
+
+---
+
+## 6. ARCHITECTURAL DESIGN DECISIONS
+
+### D1. Establishment-Based Extraction
+
+Decision:
+
+Candidates are selected using the establishment code Cd_etab.
+
+Supported series codes range from 30 to 38.
+
+Reason:
+
+The provincial workbook contains candidates from multiple establishments.
+
+The toolkit processes one establishment at a time.
+
+Consequences:
+
+- The provincial workbook is opened read-only.
+- Establishment-code input is validated.
+- Arabic-Indic digits are normalised.
+- Unsupported series are excluded.
+- Missing establishment codes are reported explicitly.
+
+
+### D2. Header-Based Source Column Identification
+
+Decision:
+
+Required source columns are located using their header names.
+
+Subject fields remain mapped by series because their meanings depend on the Notef position.
+
+Reason:
+
+Header-based identification is more robust than assuming that all source columns always occupy fixed positions.
+
+Consequences:
+
+A change in the Ministry's Notef order requires reviewing the series mapping.
+
+
+### D3. Independent Modules with Centralised Orchestration
+
+Decision:
+
+Each processing stage remains independently executable.
+
+A central orchestrator coordinates the complete workflow.
+
+Reason:
+
+Independent execution allows users to repeat a specific operation without running the entire pipeline.
+
+The master workflow provides a reliable integrated execution path.
+
+Consequences:
+
+- Modules remain logically independent.
+- The orchestrator controls execution order.
+- Workbook structures define the data exchange contract.
+- Explicit status interfaces define the execution contract.
+- Repeated helper code is permitted when it preserves module independence.
+
+
+### D4. Explicit Status Reporting
+
+Decision:
+
+Every stage publishes an explicit status and detail message.
+
+Reason:
+
+Returning control to Excel does not prove that the intended operation completed successfully.
+
+Consequences:
+
+- No success inference from macro return.
+- No success inference from file timestamps.
+- Missing status is failure.
+- The workflow stops after the first non-OK status.
+
+
+### D5. In-Memory Repeat-Status Matching
+
+Decision:
+
+Source records are collected and matched in memory before modifying the target workbook.
+
+Matching uses:
+
+- Series.
+- Normalised full name.
+- Date of birth.
+
+Reason:
+
+In-memory processing improves performance and allows matching decisions to be completed before target modification.
+
+Consequences:
+
+The target workbook is not modified until source collection and matching calculations have completed successfully.
+
+
+### D6. One-Character Name Discrepancy Rule
+
+Decision:
+
+A unique one-character name discrepancy may be accepted when the date of birth matches exactly.
+
+The value is transferred, but the case is flagged for human review.
+
+Reason:
+
+A minor spelling discrepancy should not automatically prevent a valid transfer when the date of birth and unique candidate identity support the match.
+
+Consequences:
+
+Exact matches are transferred normally.
+
+Unique one-character discrepancies are transferred with the warning:
+
+Transferred with Name Discrepancy
+
+Ambiguous cases are not transferred.
+
+The system must not over-normalise names or merge distinct identities without evidence.
+
+
+### D7. Temporary Backup Protection
+
+Decision:
+
+A temporary timestamped backup is created before modifying the target workbook.
+
+The backup is deleted only after:
+
+1. The target workbook has been updated successfully.
+2. The target workbook has been saved successfully.
+3. The saved target has been verified successfully.
+
+Reason:
+
+The backup provides recovery protection during the write operation.
+
+Consequences:
+
+Successful update, save, and verification:
+
+Delete the temporary backup.
+
+Transfer failure:
+
+Preserve the backup.
+
+Save failure:
+
+Preserve the backup.
+
+Verification failure:
+
+Preserve the backup.
+
+The backup is a temporary safety mechanism, not a permanent output of every successful run.
+
+
+### D8. Separate Analysis Workbook
+
+Decision:
+
+The analysis stage creates a separate workbook.
+
+The original extraction workbook remains unchanged.
+
+Reason:
+
+The extraction workbook is the clean candidate-level data source.
+
+Analysis output can be regenerated independently.
+
+Consequences:
+
+The analysis workbook represents the extraction workbook at the time of analysis.
+
+If repeat status is updated after analysis, the existing analysis workbook does not update automatically.
+
+Analysis must be run again to reflect the updated data.
+
+
+### D9. Formula Freezing
+
+Decision:
+
+Generated analysis formulas are converted into values after calculation.
+
+Reason:
+
+The analysis workbook is intended to function as a standalone report.
+
+Consequences:
+
+The output is a snapshot.
+
+Changes to the source workbook require regenerating the analysis workbook.
+
+
+### D10. Array-Based Processing
+
+Decision:
+
+Large source ranges are read into memory arrays.
+
+Processing is performed in memory.
+
+Output is written in bulk where practical.
+
+Reason:
+
+Cell-by-cell worksheet access is unnecessarily slow for large provincial datasets.
+
+Consequences:
+
+New code should avoid repeated worksheet-cell access inside large processing loops unless there is a measured reason.
+
+
+### D11. Safe Failure and Excel State Restoration
+
+Decision:
+
+Processing modules preserve and restore relevant Excel application settings.
+
+Consequences:
+
+- Captured settings must be restored on success.
+- Captured settings must be restored on cancellation.
+- Captured settings must be restored on failure.
+- Existing output files must not be overwritten.
+- Failed intermediate analysis copies must be closed and removed where applicable.
+
+Cleanup logic must cover every exit path.
+
+
+### D12. Deliberate Module Independence
+
+Decision:
+
+Some helper routines, formatting procedures, constants, and file-handling logic may be duplicated across modules.
+
+Reason:
+
+Module independence is an explicit architectural objective.
+
+A module should be importable and executable without depending on unrelated helper modules.
+
+Consequences:
+
+Duplicated code must be kept consistent.
+
+Code duplication is not automatically considered a defect in this architecture.
+
+
+### D13. Arabic Text Encoding
+
+Decision:
+
+Arabic strings in exported VBA source may be represented through Unicode code-point helper routines such as:
+
+ArHex
+ArabicText
+
+Reason:
+
+Legacy code pages can corrupt Arabic literals during VBA source export and import.
+
+Consequences:
+
+The source may be less immediately readable, but the encoded strings improve portability across supported Windows environments.
+
+Changes to this approach must be tested through export and re-import in Excel.
+
+
+### D14. Source-Oriented Interface Organisation
+
+Decision:
+
+The BAC master command is hosted in the Term03 data-processing panel.
+
+Reason:
+
+Both workflows use the Source03 raw-data directory.
+
+Consequences:
+
+- The master command is available from the relevant source-processing interface.
+- BAC processing logic remains in BAC modules.
+- The interface must not contain an unintended duplicate master command.
+- Individual BAC stage commands remain available.
+
+---
+
+## 7. REPEAT-STATUS MATCHING SPECIFICATION
+
+### 7.1 Source Worksheet Identification
+
+Only third-year secondary worksheets whose merged H1 title begins with:
+
+ثالثة ثانوي
+
+are considered.
+
+Source fields:
+
+Column B:
+Full name.
+
+Column C:
+Date of birth.
+
+Column E:
+Repeat status.
+
+Data begins at row 3.
+
+The source workbook is read-only.
+
+
+### 7.2 Name Normalisation
+
+The agreed normalisation includes:
+
+- Unifying Alef variants.
+- Folding Taa Marbuta into Haa.
+- Removing diacritics.
+- Removing Tatweel.
+- Removing leading and trailing spaces.
+- Removing redundant spaces.
+- Normalising non-breaking spaces.
+
+Normalisation must remain conservative.
+
+It must not collapse distinct names into the same identity without an explicit matching rule.
+
+
+### 7.3 Date Normalisation
+
+Dates are compared using a common:
+
+yyyymmdd
+
+representation.
+
+The implementation must support recognised Excel date values and text dates using:
+
+/
+-
+.
+
+The date must be valid before it is used as an identity criterion.
+
+
+### 7.4 Matching Outcomes
+
+Exact match:
+
+One unique candidate with a valid repeat status.
+
+Action:
+Transfer the value.
+
+
+Duplicate exact source records with the same valid status:
+
+Action:
+Handle according to the established duplicate-source rule.
+
+Contradictory duplicate statuses must never be transferred.
+
+
+Unique one-character name discrepancy:
+
+Conditions:
+
+- Exact date-of-birth match.
+- Exactly one plausible candidate.
+- Valid repeat status.
+
+Action:
+
+Transfer the value.
+
+Report:
+
+Transferred with Name Discrepancy
+
+
+Ambiguous candidates:
+
+Action:
+Do not transfer.
+
+
+Contradictory repeat statuses:
+
+Action:
+Do not transfer.
+
+
+Invalid repeat status:
+
+Action:
+Do not transfer.
+
+
+Incomplete identity:
+
+Action:
+Do not transfer.
+
+
+Date-of-birth mismatch:
+
+Action:
+Do not transfer.
+
+
+### 7.5 Target Write Rules
+
+- Write values only.
+- Write to column E.
+- Begin at row 3.
+- Preserve existing values for candidates not transferred.
+- Complete matching calculations before writing.
+- Reject source and target paths referring to the same workbook.
+- Reject a read-only target.
+- Do not modify the target if source collection or matching computation fails.
+
+
+### 7.6 Matching Report
+
+The report should distinguish:
+
+- Exact matches.
+- One-character discrepancies transferred with a warning.
+- Unmatched candidates.
+- Ambiguous cases.
+- Invalid statuses.
+- Contradictory statuses.
+- Target worksheets without source counterparts.
+
+Candidate-level details should be included where implemented.
+
+Documentation must not claim that detailed candidate listings exist unless the current report implementation actually produces them.
+
+
+---
+
+## 8. ANALYSIS WORKBOOK
+
+### 8.1 Output
+
+The analysis stage creates a separate workbook.
+
+It includes:
+
+- Individual series analysis.
+- Statistical tables.
+- Consolidated school analysis.
+- Gen summary worksheet.
+
+### 8.2 Original Workbook Protection
+
+The extraction workbook remains unchanged.
+
+### 8.3 Snapshot Behaviour
+
+Generated formulas are calculated and converted into values.
+
+The resulting workbook is a standalone analysis snapshot.
+
+It does not automatically update when the extraction workbook changes.
+
+---
+
+## 9. KNOWN LIMITATIONS AND RISKS
+
+The following are architectural risks and maintenance considerations.
+
+They should not be interpreted as evidence that the tested workflow is currently failing.
+
+### 9.1 Subject Mapping Risk
+
+The meaning of Notef positions depends on the Ministry export format.
+
+A change in their order may cause incorrect subject labelling unless the mapping is updated.
+
+### 9.2 Arabic Worksheet Title Keywords
+
+Third-term worksheet identification depends on expected Arabic title keywords.
+
+Changes to official or local worksheet naming may cause mapping failures.
+
+### 9.3 Analysis Snapshot
+
+The analysis workbook does not update automatically after changes to the extraction workbook.
+
+The analysis stage must be rerun.
+
+### 9.4 One-Character Matching
+
+One-character discrepancies are deliberately accepted when the candidate is unique and the date of birth matches.
+
+These cases still require human review.
+
+### 9.5 Ambiguous Identity Records
+
+Duplicate or conflicting source records must not be transferred unless a unique valid result can be established.
+
+### 9.6 Excel Environment
+
+The toolkit depends on Microsoft Excel for Windows and VBA behaviour.
+
+Potential environmental factors include:
+
+- Regional date formats.
+- File permissions.
+- Macro security.
+- Font availability.
+- Source directory availability.
+
+### 9.7 Source Directory Availability
+
+The repeat-status stage requires the expected Source03 directory and valid source workbook structure.
+
+Missing input must be reported as a stage failure.
+
+It must not be treated as an empty successful dataset.
+
+### 9.8 Status Protocol Integrity
+
+The master workflow depends on every stage publishing a fresh, valid status.
+
+A missing or stale status must never permit the next stage to run.
+
+### 9.9 Deliberate Code Duplication
+
+Self-contained modules reduce installation dependencies but require synchronisation when common behaviour changes.
+
+### 9.10 Repository Privacy
+
+The repository must not contain:
+
+- Provincial BAC exports.
+- Candidate workbooks.
+- Real pupil data.
+- Confidential school reports.
+- Private identifiers.
+- Personal file paths.
+
+VBA source must also be reviewed for embedded sensitive information.
+
+---
+
+## 10. OPERATIONAL VALIDATION
+
+The project owner confirmed practical Excel testing of the updated modules and integrated workflow.
+
+### 10.1 Successful End-to-End Test
+
+All three stages completed successfully.
+
+Stage 1:
+School results extraction.
+
+- Number of worksheets: 5
+- Number of candidates: 147
+
+Stage 2:
+Repeat-status retrieval.
+
+- Matching repeat-status values: 145
+- Generated report:
+  RepeatStatus_Report_20261104_120457.xlsx
+
+Stage 3:
+School results analysis.
+
+- Number of worksheets: 6
+
+Final result:
+
+All stages completed successfully.
+
+
+### 10.2 Failure Test
+
+A deliberately incorrect code caused the workflow to stop.
+
+The orchestrator did not continue to subsequent stages.
+
+This confirmed the stop-on-first-failure behaviour for that test case.
+
+
+### 10.3 Missing Source03 Test
+
+The Source03 directory was unavailable.
+
+Observed behaviour:
+
+- Stage 1 completed successfully.
+- Stage 2 failed because the expected source directory was missing.
+- Stage 3 was skipped.
+- The final report identified the failed stage and reason.
+
+After restoring the correct directory name:
+
+Source03
+
+the workflow executed successfully.
+
+
+### 10.4 Interface and Reporting Test
+
+The project owner confirmed:
+
+- Stage messages appeared as agreed.
+- Consolidated reports appeared correctly.
+- Failure reasons were reported.
+- The interface layout was organised.
+- Status indicators operated as intended.
+
+### 10.5 Interpretation of Matching Counts
+
+The successful test extracted 147 candidates and transferred 145 repeat-status values.
+
+The difference between these numbers is a matching outcome requiring interpretation through the repeat-status report.
+
+It must not automatically be classified as a processing error.
+
+### 10.6 Validation Type
+
+Validation was performed through practical manual testing in Microsoft Excel.
+
+This document does not claim the existence of an automated unit-test suite.
+
+---
+
+## 11. MAINTENANCE RULES
+
+1. Treat the extraction workbook layout as a formal interface between modules.
+2. Update every dependent module when a workbook field changes position or meaning.
+3. Review all series mappings when adding a series or changing subject lists.
+4. Preserve independent execution of each processing stage.
+5. Preserve explicit stage-status reporting.
+6. Reset status at the beginning of every run.
+7. Publish a final status on every exit path.
+8. Continue the master workflow only after explicit OK.
+9. Treat missing or invalid status as failure.
+10. Preserve the one-character discrepancy rule.
+11. Transfer a one-character discrepancy only when the date of birth matches and the candidate is unique.
+12. Never transfer ambiguous or contradictory matching cases.
+13. Complete matching calculations before modifying the target workbook.
+14. Preserve the temporary backup if transfer, saving, or verification fails.
+15. Delete the backup only after successful update, save, and verification.
+16. Never modify source workbooks.
+17. Never overwrite existing output files.
+18. Restore captured Excel application settings on every exit path.
+19. Keep duplicated helper procedures consistent.
+20. Preserve module independence.
+21. Keep real candidate data out of the repository.
+22. Update README.md when user-facing behaviour changes.
+23. Update ARCHITECTURE.txt when architecture, contracts, or design decisions change.
+24. Do not document a proposed feature as implemented without confirming its implementation and behaviour.
+
+---
+
+## 12. APPENDIX: SUPPORTED SERIES
+
+Cd_serie mapping:
+
+30 = Philo
+31 = LaEtr
+32 = GeEc
+33 = SE
+34 = Math
+35 = TGM
+36 = TGE
+37 = TGC
+38 = TGP
+
+Series descriptions:
+
+30:
+Literature and Philosophy.
+
+31:
+Foreign Languages.
+
+32:
+Management and Economics.
+
+33:
+Experimental Sciences.
+
+34:
+Mathematics.
+
+35:
+Technical Mathematics - Mechanical Engineering.
+
+36:
+Technical Mathematics - Electrical Engineering.
+
+37:
+Technical Mathematics - Civil Engineering.
+
+38:
+Technical Mathematics - Process Engineering.
+
+
+Subject column counts:
+
+30 - Philo: 8
+31 - LaEtr: 9
+32 - GeEc: 11
+33 - SE: 10
+34 - Math: 10
+35 - TGM: 10
+36 - TGE: 10
+37 - TGC: 10
+38 - TGP: 10
+
+Physical Education (Eps) is placed before the subject columns.
+
+The last two columns contain:
+
+Moyenne
+MoyenneMe
+
+
+---
+
+## 13. DOCUMENT MAINTENANCE
+
+This document must be updated whenever a change affects:
+
+- Workbook structure.
+- Module responsibilities.
+- Entry points.
+- Workflow orchestration.
+- Status reporting.
+- Matching rules.
+- Backup lifecycle.
+- Source-file requirements.
+- Error handling.
+- Architectural decisions.
+
+Implementation claims must be checked against the current VBA source and, where applicable, validated in Excel.
+
+A commit message or design proposal alone is not sufficient evidence that a feature has been implemented.
