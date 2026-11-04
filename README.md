@@ -173,16 +173,24 @@ Optional fonts: Dubai, Dubai Medium, Aptos Slab.
 11. Planned improvements
 Unmatched candidates in the repeat-status report. Each candidate that cannot be matched will be listed by sheet and by the number in column A, and the process will continue without interruption. Currently the report gives counts only.
 ---
-12. Validation status
-This repository contains source modules only. It includes no automated tests and no sample data. Results should be checked against a known school before any official use, and compatibility with Excel versions and source-file layouts other than those described here has not been formally established.
----
-13. Data privacy and repository scope
-This repository preserves and tracks the VBA source code. Do not commit candidate records, provincial or school result workbooks, or any file containing personal data, passwords or tokens.
----
-14. Related repositories and roadmap
-ResultsAnalysisTerm02 – second-term results analysis and orientation.
-ResultsAnalysisTerm03 – third-term results tools; produces the third-term results workbook used for repeat status.
-The long-term goal is to merge all of these repositories into a single, comprehensive application.
----
-Platform: Microsoft Excel / VBA
-Scope: Single-school extraction and analysis of Baccalaureate results
+## 12. Validation and Operational Status
+
+**<span style="color:green">Successfully tested and operational</span>**
+
+All VBA modules in this repository have been successfully tested in Microsoft Excel. Their functionality and integration have been verified, and all components are confirmed to be working as intended.
+
+The validation covers the complete workflow and its main components:
+
+| Component | Responsibility | Status |
+|---|---|---|
+| `modBacEtab` | School results extraction and candidate grouping | Passed |
+| `modRepeatStatus` | Student repetition-status processing and updating | Passed |
+| `modBacAnalysis` | Statistical analysis and report generation | Passed |
+| `modBuildBacPanel` | Control panel creation and macro integration | Passed |
+| `frmEtabCode` | School code input and validation interface | Passed |
+
+The successful tests confirm that the modules operate correctly within the intended Excel environment and that the integrated workflow performs its designated tasks.
+
+**Validation scope:** Manual testing in Microsoft Excel.
+
+**Current status:** All repository modules are operational. No known blocking issues remain in the tested functionality.
