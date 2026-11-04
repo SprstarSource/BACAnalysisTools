@@ -112,6 +112,19 @@ Private mSets() As RepeatSet
 Private mYes As String
 Private mNo As String
 
+' one-click mode (set by the control panel button "process BAC results")
+Private mAuto As Boolean
+Private mLastOK As Boolean
+Private mLastSummary As String
+
+' status reported to the control panel (the panel never assumes success)
+Private Const ST_NONE As Long = 0       ' no report (the macro did not finish properly)
+Private Const ST_OK As Long = 1         ' finished successfully
+Private Const ST_CANCEL As Long = 2     ' cancelled by the user
+Private Const ST_FAIL As Long = 3       ' failed (reason in mDetail)
+Private mStatus As Long
+Private mDetail As String
+
 ' log of the report
 Private mLogN As Long
 Private mLogCat() As Long
@@ -155,6 +168,10 @@ Public Sub Run_RepeatStatus()
 
     On Error GoTo FatalError
 
+    mLastOK = False
+    mLastSummary = ""
+    mStatus = ST_NONE
+    mDetail = ""
     mYes = Ar("yes")
     mNo = Ar("no")
     Erase mSets
@@ -163,23 +180,30 @@ Public Sub Run_RepeatStatus()
 
     ' ---- pre-flight: this workbook must be saved locally and Source03 must exist ----
     If Len(ThisWorkbook.Path) = 0 Then
-        ShowMsg Ar("save_first"), vbExclamation
+        EndEarly Ar("save_first"), True
         Exit Sub
     End If
     If LCase$(Left$(ThisWorkbook.Path, 4)) = "http" Then
-        ShowMsg Ar("url_path"), vbExclamation
+        EndEarly Ar("url_path"), True
         Exit Sub
     End If
     srcFolder = ThisWorkbook.Path & Application.PathSeparator & SOURCE_FOLDER_NAME & Application.PathSeparator
     If Not FolderExistsPath(Left$(srcFolder, Len(srcFolder) - 1)) Then
-        ShowMsg Ar("no_src_folder") & vbLf & srcFolder, vbExclamation
+        EndEarly Ar("no_src_folder") & vbLf & srcFolder, True
         Exit Sub
     End If
     sourcePath = srcFolder
 
     ' ---- the only question: the file that RECEIVES the values ----
     targetPath = AskTargetFile()
-    If Len(targetPath) = 0 Then Exit Sub
+    If Len(targetPath) = 0 Then
+        If mAuto Then
+            EndEarly Ar("no_input"), True       ' no extraction file = the previous stage did not deliver
+        Else
+            EndEarly Ar("st_cancel"), False     ' the user cancelled
+        End If
+        Exit Sub
+    End If
 
     prevScreen = Application.ScreenUpdating
     prevEvents = Application.EnableEvents
@@ -320,9 +344,13 @@ Public Sub Run_RepeatStatus()
 
     If mTotWrite > 0 Then
         Application.StatusBar = False
-        answer = MsgBox(Ar("c_write") & mTotWrite & vbLf & vbLf & Ar("c_yes") & vbLf & Ar("c_no"), _
-                        vbYesNo + vbQuestion + vbMsgBoxRight + vbMsgBoxRtlReading, Ar("c_title"))
-        doWrite = (answer = vbYes)
+        If mAuto Then
+            doWrite = True      ' one-click mode: already confirmed on the control panel
+        Else
+            answer = MsgBox(Ar("c_write") & mTotWrite & vbLf & vbLf & Ar("c_yes") & vbLf & Ar("c_no"), _
+                            vbYesNo + vbQuestion + vbMsgBoxRight + vbMsgBoxRtlReading, Ar("c_title"))
+            doWrite = (answer = vbYes)
+        End If
     End If
 
     If doWrite Then
@@ -392,7 +420,9 @@ CleanExit:
                 fatalText = fatalText & vbLf & vbLf & Ar("bk_keep") & vbLf & backupPath
             End If
         End If
-        ShowMsg Ar("stopped") & vbLf & fatalText, vbExclamation
+        mStatus = ST_FAIL
+        mDetail = fatalText
+        If Not mAuto Then ShowMsg Ar("stopped") & vbLf & fatalText, vbExclamation
         Exit Sub
     End If
 
@@ -422,8 +452,64 @@ CleanExit:
     Else
         report = report & vbLf & vbLf & Ar("r_reportfail")
     End If
-    ShowMsg report, vbInformation
+    ' ---- final status: reported explicitly, never inferred by the caller ----
+    If saved Then
+        mStatus = ST_OK
+        mDetail = Ar("r_written") & mTotWrite
+        If Len(reportPath) > 0 Then mDetail = mDetail & vbLf & reportPath
+    ElseIf doWrite Then
+        mStatus = ST_FAIL               ' values were written but the save could not be verified
+        mDetail = Ar("save_unver") & vbLf & backupNote
+    ElseIf mTotWrite = 0 Then
+        mStatus = ST_OK                 ' nothing to write: valid outcome
+        mDetail = Ar("no_change")
+        If Len(reportPath) > 0 Then mDetail = mDetail & vbLf & reportPath
+    Else
+        mStatus = ST_CANCEL             ' the user declined the write (manual mode only)
+        mDetail = Ar("st_cancel")
+    End If
+    mLastOK = (mStatus = ST_OK)
+    mLastSummary = report
+    If Not mAuto Then
+        If mStatus = ST_FAIL Then ShowMsg report, vbExclamation Else ShowMsg report, vbInformation
+    End If
 End Sub
+
+' Stops before any work started: records the reason (message shown in manual mode only)
+Private Sub EndEarly(ByVal reason As String, ByVal isFailure As Boolean)
+    If isFailure Then mStatus = ST_FAIL Else mStatus = ST_CANCEL
+    mDetail = reason
+    If isFailure And Not mAuto Then ShowMsg reason, vbExclamation
+End Sub
+
+' ---------------------------------------------------------------------
+' Entry points used by the control panel (modBuildBacPanel)
+' ---------------------------------------------------------------------
+Public Function RepeatStatus_Probe() As Boolean
+    RepeatStatus_Probe = True
+End Function
+
+Public Sub RepeatStatus_SetAuto(ByVal v As Boolean)
+    mAuto = v
+End Sub
+
+Public Function RepeatStatus_LastOK() As Boolean
+    RepeatStatus_LastOK = mLastOK
+End Function
+
+Public Function RepeatStatus_LastSummary() As String
+    RepeatStatus_LastSummary = mLastSummary
+End Function
+
+' 0 = no report, 1 = success, 2 = cancelled, 3 = failed
+Public Function RepeatStatus_LastStatus() As Long
+    RepeatStatus_LastStatus = mStatus
+End Function
+
+' success: short result - failure: the reason
+Public Function RepeatStatus_LastDetail() As String
+    RepeatStatus_LastDetail = mDetail
+End Function
 
 ' ---------------------------------------------------------------------
 ' Phase 1 helpers
@@ -1195,6 +1281,11 @@ Private Function AskTargetFile() As String
     On Error GoTo 0
 #End If
 
+    If mAuto Then               ' one-click mode: use the file that was just extracted, never ask
+        If FileExists(lastExtract) Then AskTargetFile = lastExtract
+        Exit Function
+    End If
+
     If FileExists(lastExtract) Then
         answer = MsgBox(Ar("q2_head") & vbLf & vbLf & Ar("q2_last") & vbLf & lastExtract & vbLf & vbLf & _
                         Ar("q2_yes") & vbLf & Ar("q2_no") & vbLf & Ar("q2_cancel"), _
@@ -1473,6 +1564,12 @@ Private Function Ar(ByVal key As String) As String
             s = ArHex("646 639 645")
         Case "no"
             s = ArHex("644 627")
+        Case "no_input"
+            s = ArHex("644 627 20 64A 648 62C 62F 20 645 644 641 20 646 62A 627 626 62C 20 645 64F 633 62A 62E 631 64E 62C 20 644 625 643 645 627 644 20 62D 627")
+            s = s & ArHex("644 627 62A 20 627 644 625 639 627 62F 629 20 641 64A 647 2E 20 646 641 650 651 630 20 645 631 62D 644 629 20 627 633 62A 62E 631 627 62C")
+            s = s & ArHex("20 627 644 646 62A 627 626 62C 20 623 648 644 627 64B 2E")
+        Case "st_cancel"
+            s = ArHex("623 644 63A 649 20 627 644 645 633 62A 62E 62F 645 20 627 644 639 645 644 64A 629 2E")
     End Select
     Ar = s
 End Function
@@ -1939,7 +2036,7 @@ Private Sub SrcCollectAll(ByRef wbResult As Workbook, _
     Loop
 
     If names.Count = 0 Then
-        MsgBox "Source03 folder is empty or contains no Excel files:" & vbCrLf & SourcePath, vbExclamation, "Empty Source03 Folder"
+        SkippedList = "  - Source03 folder is empty or contains no Excel files: " & SourcePath & vbCrLf
         Exit Sub
     End If
 
@@ -1965,9 +2062,7 @@ Private Sub SrcCollectAll(ByRef wbResult As Workbook, _
         End If
     Next i
 
-    If CopiedCount = 0 Then
-        MsgBox "None of the source files could be processed.", vbCritical, "Collection Failed"
-    End If
+    ' CopiedCount = 0 is reported by the caller (SrcBuildWorkbook -> failure with SkippedList)
 End Sub
 
 
