@@ -49,6 +49,15 @@ Private mFontName As String
 Private mFontNum As String
 Private mYes As String
 
+' ---- run status (read by the control panel / main button) ----
+Private Const ST_NONE As Long = 0       ' no report (the macro did not finish properly)
+Private Const ST_OK As Long = 1         ' finished successfully
+Private Const ST_CANCEL As Long = 2     ' cancelled by the user
+Private Const ST_FAIL As Long = 3       ' failed (reason in mDetail)
+Private mAuto As Boolean                ' automatic mode: no success message, no file dialog
+Private mStatus As Long
+Private mDetail As String
+
 ' ---------------------------------------------------------------------
 Public Sub Run_BacAnalysis()
     Dim wb As Workbook, ws As Worksheet, info() As SeriesInfo
@@ -58,6 +67,8 @@ Public Sub Run_BacAnalysis()
     Dim stateSaved As Boolean, Failed As Boolean, cancelled As Boolean, savedOK As Boolean
     Dim errText As String, summary As String
 
+    mStatus = ST_NONE
+    mDetail = ""
     On Error GoTo Failed
     oldScreen = Application.ScreenUpdating
     oldEvents = Application.EnableEvents
@@ -70,9 +81,12 @@ Public Sub Run_BacAnalysis()
 
     mYes = Ar("yes")
     srcPath = modBacEtab.gLastBacEtabPath
+    If Len(srcPath) > 0 Then
+        If Not FileExists(srcPath) Then srcPath = ""
+    End If
     If Len(srcPath) = 0 Then
-        srcPath = PickFile()
-    ElseIf Not FileExists(srcPath) Then
+        ' automatic mode never asks: no extraction file means the previous stage did not deliver
+        If mAuto Then Err.Raise vbObjectError + 912, "modBacAnalysis", Ar("no_input")
         srcPath = PickFile()
     End If
     If Len(srcPath) = 0 Then
@@ -124,6 +138,7 @@ Public Sub Run_BacAnalysis()
     wb.Worksheets("Gen").Activate
     wb.Worksheets("Gen").Range("A1").Select
     wb.Save
+    If Not FileExists(dstPath) Then Err.Raise vbObjectError + 913, "modBacAnalysis", Ar("save_chk") & vbLf & dstPath
     savedOK = True
 
 Finished:
@@ -139,19 +154,47 @@ Finished:
         Application.ScreenUpdating = oldScreen
     End If
     On Error GoTo 0
-    If cancelled Then Exit Sub
+    If cancelled Then
+        mStatus = ST_CANCEL
+        mDetail = Ar("st_cancel")
+        Exit Sub
+    End If
     If Failed Then
-        MsgBox Ar("failed") & vbLf & errText, vbCritical + vbMsgBoxRight + vbMsgBoxRtlReading, Ar("app_title")
+        mStatus = ST_FAIL
+        mDetail = errText
+        If Not mAuto Then
+            MsgBox Ar("failed") & vbLf & errText, vbCritical + vbMsgBoxRight + vbMsgBoxRtlReading, Ar("app_title")
+        End If
     Else
-        summary = Ar("done") & vbLf & dstPath & vbLf & Ar("sheets") & ": " & (n + 1)
-        MsgBox summary, vbInformation + vbMsgBoxRight + vbMsgBoxRtlReading, Ar("app_title")
+        mStatus = ST_OK
+        mDetail = dstPath & vbLf & Ar("sheets") & ": " & (n + 1)
+        If Not mAuto Then       ' automatic mode: the main button shows ONE final report
+            summary = Ar("done") & vbLf & dstPath & vbLf & Ar("sheets") & ": " & (n + 1)
+            MsgBox summary, vbInformation + vbMsgBoxRight + vbMsgBoxRtlReading, Ar("app_title")
+        End If
     End If
     Exit Sub
 Failed:
     Failed = True
     errText = Err.Description
+    If Len(errText) = 0 Then errText = "#" & CStr(Err.Number)
     Resume Finished
 End Sub
+
+' ---------------------------------------------------------------------
+'  Status API (used by modBuildBacPanel)
+' ---------------------------------------------------------------------
+Public Sub BacAnalysis_SetAuto(ByVal v As Boolean)
+    mAuto = v
+End Sub
+
+Public Function BacAnalysis_LastStatus() As Long
+    BacAnalysis_LastStatus = mStatus
+End Function
+
+Public Function BacAnalysis_LastDetail() As String
+    BacAnalysis_LastDetail = mDetail
+End Function
 
 ' ---------------------------------------------------------------------
 '  Files
@@ -798,6 +841,11 @@ Private Function Ar(ByVal key As String) As String
     Case "working": Ar = ArHex("62C 627 631 64D 20 627 644 62A 62D 636 64A 631 3A")
     Case "pick_title": Ar = ArHex("627 62E 62A 631 20 645 644 641 20 646 62A 627 626 62C 20 627 644 62B 627 646 648 64A 629")
     Case "no_series": Ar = ArHex("644 645 20 64A 62A 645 20 627 644 639 62B 648 631 20 639 644 649 20 623 648 631 627 642 20 627 644 634 639 628 20 641 64A 20 627 644 645 644 641")
+    Case "save_chk": Ar = ArHex("62A 639 630 651 631 20 627 644 62A 62D 642 642 20 645 646 20 648 62C 648 62F 20 645 644 641 20 627 644 62A 62D 644 64A 644 20 628 639 62F")
+        Ar = Ar & ArHex("20 627 644 62D 641 638 3A")
+    Case "st_cancel": Ar = ArHex("623 644 63A 649 20 627 644 645 633 62A 62E 62F 645 20 627 644 639 645 644 64A 629 2E")
+    Case "no_input": Ar = ArHex("644 627 20 64A 648 62C 62F 20 645 644 641 20 646 62A 627 626 62C 20 645 64F 633 62A 62E 631 64E 62C 20 644 62A 62D 644 64A 644 647 2E 20")
+        Ar = Ar & ArHex("646 641 650 651 630 20 645 631 62D 644 629 20 627 633 62A 62E 631 627 62C 20 627 644 646 62A 627 626 62C 20 623 648 644 627 64B 2E")
     Case "failed": Ar = ArHex("62A 639 630 631 20 625 646 634 627 621 20 645 644 641 20 627 644 62A 62D 644 64A 644 3A")
     Case "done": Ar = ArHex("62A 645 20 625 646 634 627 621 20 645 644 641 20 627 644 62A 62D 644 64A 644 3A")
     Case "sheets": Ar = ArHex("639 62F 62F 20 627 644 623 648 631 627 642")
