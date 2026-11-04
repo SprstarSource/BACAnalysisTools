@@ -1,196 +1,779 @@
-BACAnalysisTools
-Excel VBA toolkit that extracts the complete Baccalaureate (BAC) results of a single school from the provincial results file, completes them with repeat status, and produces a statistical analysis workbook for every série and for the school as a whole.
+# BACAnalysisTools
+
+**An Excel VBA toolkit for extracting, completing, and statistically analysing school-level Baccalaureate (BAC) results.**
+
+BACAnalysisTools extracts the complete Baccalaureate results of a single school from the provincial results file, retrieves candidates' repeat status from the school's third-term results, and generates a statistical analysis workbook for every *série* and for the school as a whole.
+
+The toolkit is designed to handle large provincial datasets efficiently while preserving the original source files and ensuring that each processing stage reports its execution status explicitly.
+
 ---
-1. Purpose and design challenge
-The provincial BAC results file is a single flat table covering every candidate in the province: typically around 30,000 rows and columns extending to `BT`. Extracting one school's results from it by hand is slow and error-prone, because each candidate's marks sit in positional columns (`Notef1` … `Notef11`) whose meaning depends on the candidate's série.
-This project automates the whole job in three steps:
-Extraction – isolate every candidate of one school, group them by série, map each positional mark column to the correct subject, and rank candidates by their average. The result is a formatted school workbook named after the school.
-Repeat status – complete the school workbook with each candidate's repeat status, taken from the school's third-term results.
-Analysis – build statistical tables for each série and a consolidated summary for the whole school.
-The original provincial file is only read. It is never modified, moved or deleted.
+
+## 1. Purpose and Design
+
+The provincial BAC results file is a single flat table covering all candidates in the province. It typically contains around 30,000 rows, with columns extending to `BT`.
+
+Extracting one school's results manually is time-consuming and error-prone. Each candidate's marks are stored in positional columns (`Notef1` … `Notef11`), whose subject meanings depend on the candidate's *série*.
+
+BACAnalysisTools automates this process through three stages:
+
+1. **Extraction** — Isolate all candidates belonging to one school, group them by *série*, map their marks to the appropriate subjects, and rank them by average.
+2. **Repeat Status** — Retrieve each candidate's repeat status from the school's third-term results and transfer it to the school workbook.
+3. **Analysis** — Generate statistical tables for each *série* and a consolidated school-wide summary.
+
+The original provincial results file is opened read-only. It is never modified, moved, or deleted.
+
+### Design principles
+
+- Independent modules that can be executed individually.
+- A coordinated workflow for running all three stages in sequence.
+- Explicit execution status for every stage.
+- Immediate termination when a stage fails or is cancelled.
+- No overwriting of existing output files.
+- In-memory processing wherever practical.
+- Safe handling of source and target workbooks.
+- Static analysis outputs that remain unchanged after generation.
+
 ---
-2. Pipeline
+
+## 2. Processing Pipeline
+
+```text
+Provincial BAC Results File
+          |
+          v
+   [1] Extract School Results
+          |
+          v
+   School Workbook (.xlsx)
+   One worksheet per série
+          |
+          v
+   [2] Fetch Repeat Status
+          |
+          v
+   Column E updated with repeat status
+          |
+          v
+   [3] Analyse School Results
+          |
+          v
+   Analysis Workbook (.xlsx)
+   - Statistical tables per série
+   - General school summary (Gen)
 ```
- Provincial file ─────────► [1] Extract ─────────► School workbook (.xlsx, named after the school)
- BAC<year>ResultatsOriginal.xlsx                    one sheet per série
- (read-only)                                                │
-                                                            ▼
- Third-term results workbook ─► [2] Fetch repeat status ─► column E filled in the school workbook
- (read-only)                                                │
-                                                            ▼
-                                       [3] Analyse ─────► analysis copy: tables per série + "Gen" sheet
-```
-Step	Module	Macro	Responsibility
-1	`modBacEtab`	`Run_BacEtab`	Extract the school's candidates, split by série, sort by average, issue the school workbook.
-2	`modRepeatStatus`	`Run_RepeatStatus`	Write the repeat status of each candidate into column E of the school workbook.
-3	`modBacAnalysis`	`Run_BacAnalysis`	Build the analysis tables and the `Gen` summary sheet in a copy of the school workbook.
-Steps 2 and 3 offer the workbook produced by the previous step as their default input (session variable `gLastBacEtabPath`), so no file has to be located manually when the steps are run in order.
----
-3. Step 1 – Extraction (`modBacEtab`, macro `Run_BacEtab`)
-3.1 Input
-Item	Requirement
-File	`BAC????ResultatsOriginal.xlsx`, where `????` is the four-digit year. If several match, the latest year is used.
-Location	The same folder as the tool workbook (which must therefore be saved).
-Worksheet	`Data`. If absent, the first worksheet whose headers contain `Cd_etab` and `Cd_serie` is used.
-Headers (row 1)	`Cd_etab`, `Cd_serie`, `Nom`, `Prenom`, `Date_jour`, `Date_mois`, `Date_annee`, `Sexe`, `Eps`, `Notef1` … `Notef11`, `Moyenne`, `MoyenneMe`. Optional: `Desi`.
-Columns are resolved by header name, never by fixed position, so the width of the provincial file does not matter. The data range is read once into a memory array and processed there; the source workbook is opened read-only and closed without saving.
-3.2 Processing
-The user enters the school's national code (`Cd_etab`) in a dialog (`frmEtabCode`, or a standard `InputBox` if the form is not installed). The dialog validates the entry inline (not empty, digits only, maximum length); Arabic-Indic digits are normalised.
-All rows whose `Cd_etab` matches are selected: these are the school's candidates. A code that exists only under series outside 30–38 produces a distinct message from a code that does not exist at all; in both cases the user is prompted again.
-Each candidate is assigned to a série from `Cd_serie` (30 to 38).
-Within each série, the marks (`Eps`, `Notef1` … `NotefN`) and the averages (`Moyenne`, `MoyenneMe`) are transferred, with `Notef1` … `NotefN` mapped to subject names through a hardcoded table keyed by `Cd_serie`. Unused `Notef` positions are skipped entirely: no column is created and no data is transferred.
-Candidates are sorted by `Moyenne` in descending order (stable sort), and column A is numbered 1…n after sorting.
-The data is placed in formatted tables, and the school workbook is issued with one sheet per série present for that school.
-3.3 Conveniences applied during extraction
-Surname (`Nom`) and first name (`Prenom`) are merged into a single name column.
-Day, month and year columns are combined into one birth date, formatted `yyyy-mm-dd` and stored as text.
-Sex is carried over from `Sexe`.
-3.4 Séries
-Code	Sheet	Série	Subject columns
-30	`Philo`	Literature and Philosophy	8
-31	`LaEtr`	Foreign Languages	9
-32	`GeEc`	Management and Economics	11
-33	`SE`	Experimental Sciences	10
-34	`Math`	Mathematics	10
-35	`TGM`	Technical Mathematics – Mechanical Engineering	10
-36	`TGE`	Technical Mathematics – Electrical Engineering	10
-37	`TGC`	Technical Mathematics – Civil Engineering	10
-38	`TGP`	Technical Mathematics – Process Engineering	10
-Subject names use unified Arabic spellings, so the same subject carries the same header in every série.
-3.5 Output sheet layout
-Column	Content
-A	Rank (after descending sort by average)
-B	Full name (surname + first name)
-C	Birth date
-D	Sex (`1` = male, `2` = female, as in the source)
-E	Repeater flag (filled in Step 2)
-F	Physical education (`Eps`)
-G …	Subject columns for the série
-next to last	Average (`Moyenne`)
-last	Core-subjects average (`MoyenneMe`)
-Each sheet is right-to-left, holds an Excel table named `T_<sheet>`, and is print-ready (landscape, fit to one page wide). Fixed layout: column A width 4.3; columns D to the last data column width 6.3; row 1 height 40; row 2 height 100 with rotated subject headers. The layout is applied last and verified by reading the values back; any deviation is reported in the final message.
-Fonts: `Dubai` / `Dubai Medium` for text and `Aptos Slab` for numbers, with automatic fallback to `Arial` / `Calibri` when they are not installed (the substitution is reported).
-3.6 Output file name
-The workbook is saved as `.xlsx` in the tool folder. The name is the school's `Desi` value (sanitised, truncated to 150 characters) or, if unavailable, `BAC<year>_<code>`. An existing file is never overwritten: a sequential suffix (`_02`, `_03`, …) is added.
----
-4. Step 2 – Repeat status (`modRepeatStatus`, macro `Run_RepeatStatus`)
-The provincial file does not state whether a candidate is a repeater. This step reads it from the school's third-term results workbook, produced by the tools of the ResultsAnalysisTerm03 repository, and writes it into column E of the school workbook.
-The repeat data is built in memory: no intermediate file is created. The source workbook is never modified.
-4.1 Workflow
-Source file. The user selects the third-term results workbook. Its name and location may vary; its structure must be identical to the one produced by the Term03 tools.
-Target file. The user selects the workbook that receives the values. If a school workbook was issued in the current session, it is offered as the default (Yes = use it, No = choose another file, Cancel = stop).
-The repeat data is built from the source, every candidate of the target is matched, and the results are written to column E.
-4.2 Reading the source
-Only sheets whose merged cell `H1` starts with the third-year-secondary prefix (`ثالثة ثانوي`) are read; other sheets are ignored.
-The last three characters of `H1` (a space and two digits) are removed to obtain the branch group. Sheets of the same group are pooled, and each group is mapped to its série sheet code (`Philo`, `LaEtr`, …) from keywords in the title. An unrecognised title, or two groups mapping to the same code, stops the process with an explicit message.
-Columns read, from row 3: `B` full name, `C` date of birth, `E` repeat status (`نعم` / `لا`).
-Duplicate candidate records are kept.
-4.3 Matching
-A target candidate is matched within the sheet of the same série code, on normalised name and date of birth:
-Name normalisation: alef variants unified, taa marbuta folded to haa, diacritics, tatweel and extra or non-breaking spaces removed.
-Date normalisation: both sides are compared as `yyyymmdd`, whether stored as dates or as text with `/`, `-` or `.` separators.
-Exact match: one matching record, or several records that all carry the same valid status.
-One-letter tolerance: a single spelling difference is accepted only when the date of birth matches and there is exactly one such candidate.
-Ambiguous: several candidates, or contradictory statuses, are never written.
-A status other than `نعم` / `لا` is never written.
-4.4 Writing
-Values only, written to column `E` from row 3; unmatched candidates keep their existing cell content.
-Everything is computed first. The target is modified only if the whole computation succeeded, and only after a timestamped backup (`Backup_RepeatStatus_<yyyymmdd_hhnnss>`, same extension) is saved next to it.
-The target is saved, and a report gives the counts of exact matches, one-letter matches, unmatched candidates and ambiguous cases, plus any target sheets with no source counterpart and the backup path.
-Source and target must be different files, and the target must not be read-only. Macros of the workbooks being opened are disabled during the operation, and Excel's settings are restored afterwards.
-Step 3 counts a candidate as a repeater when column E contains the word `نعم` ("yes").
----
-5. Step 3 – Analysis (`modBacAnalysis`, macro `Run_BacAnalysis`)
-5.1 Workflow
-Take the school workbook (from `gLastBacEtabPath`, or a file dialog if it is empty or the file is missing).
-Save a copy named `تحليل نتائج <original name>.xlsx` next to the original; the school workbook is not altered. An existing name is never overwritten (sequential suffix).
-In every série sheet that holds a table, build the analysis blocks below the data.
-Insert the `Gen` sheet as the first sheet.
-Calculate everything, then freeze all generated formulas as static values, which avoids problems when sheets are copied or values are transferred to other workbooks. The candidate data rows are left untouched.
-If anything fails, the copy is closed and deleted, and Excel's settings are restored.
-5.2 Conventions
-Only candidates with `Moyenne > 0` are analysed; an average of 0.00 denotes an absent candidate.
-Pass mark: 10 or above, on a 20-point scale.
-Per-subject pass rates use as denominator the present candidates holding a mark in that subject.
-Subjects identified as Tamazight are excluded from the analysis tables.
-Number formats: counts `00`, decimals `00.00`, percentages `[=1]%0;%00.00`.
-5.3 Blocks under each série sheet
-The blocks start two blank rows below the last data row, with one column per subject (physical education through the average).
-Block	Content
-Counters strip	Candidates analysed, males, females, repeaters.
-Table 1 – Results	Subject average; passing females; passing males; total passing; pass rate; highest mark; lowest mark; passing repeaters.
-Table 2 – Statistical indicators	Pass rate; mean; median; mode; range; standard deviation; variance; coefficient of variation.
-Table 3 – Score distribution	Candidate counts per band: `<7`, `7–8.99`, `9–9.99`, `10–11.99`, `12–13.99`, `14–15.99`, `16–17.99`, `≥18`.
-Standard deviation and variance are population measures (`STDEVP`, `VARP`); the coefficient of variation is the population standard deviation divided by the mean.
-5.4 `Gen` sheet – whole-school summary
-#	Section
-1	Registered, present, male, female and absent candidates per série, with totals.
-2	General results per série: present, passed (total, male, female) and pass rate.
-3	Pass rate by sex.
-4	Repeaters per série: count, passed, pass rate.
-5	School pass rate against provincial and national rates (provincial, national and rank cells are left for manual entry).
-6	School pass rate against the previous five sessions (past sessions left for manual entry).
-7	Repeaters by sex: count, passed and pass rate.
----
-6. Control panel (`modBuildBacPanel`)
-`BuildBacPanel` creates a `ControlPanel` sheet (right-to-left, Arabic interface) with three buttons. Any button can be run at any time.
-Button (in running order)	Macro
-Extract school results	`Run_BacEtab`
-Fetch repeat cases	`Run_RepeatStatus`
-Analyse school results	`Run_BacAnalysis`
-A busy flag prevents re-entrant clicks.
----
-7. Repository contents
-The repository holds the exported VBA source only.
-File	Role
-`modBacEtab.bas`	Step 1 – extraction, grouping by série, ranking.
-`modRepeatStatus.bas`	Step 2 – repeat status from the third-term results.
-`modBacAnalysis.bas`	Step 3 – per-série analysis tables and `Gen` sheet.
-`modBuildBacPanel.bas`	Control panel.
-`frmEtabCode.frm`, `frmEtabCode_code.txt`	School-code input dialog (optional).
----
-8. Installation and usage
-Create a macro-enabled workbook and save it in the working folder.
-In the VBA editor, import the `.bas` modules (File → Import File).
-(Optional) Add the code dialog: either import `frmEtabCode.frm`, or insert a blank UserForm named `frmEtabCode` and paste the code from `frmEtabCode_code.txt` into its code window. The dialog creates its controls at runtime, so no designer layout is required. Without it, a standard `InputBox` is used.
-Run `BuildBacPanel` once to create the control panel.
-Place the provincial file `BAC<year>ResultatsOriginal.xlsx` in the same folder as the tool workbook.
-Click Extract, enter the school code; then Fetch repeat cases, selecting the third-term results workbook; then Analyse.
----
-9. Technical notes
-Array-based processing. The provincial data is read once, filtered and transformed in memory, and written to each sheet in a single block assignment, which keeps a 30,000-row source practical.
-Safe writes. Existing files are never overwritten. The repeat-status step computes everything first and backs up the target before touching it; the analysis step works on a copy and deletes it on failure.
-Interruption handling. All steps restore `ScreenUpdating`, `EnableEvents`, `DisplayAlerts` and the status bar on completion, cancellation or failure.
-Static analysis values. After generation, formulas are replaced by values, so results do not change if the data is edited afterwards.
-Arabic text encoding. Arabic strings are built from Unicode code points (`ArHex`, `ArabicText`), because the VBA editor does not reliably store Arabic literals.
-Statistical functions. The analysis uses `COUNTIFS`, `AVERAGEIFS` and legacy array formulas; no dynamic-array functions are required.
----
-10. Requirements
-Microsoft Excel for Windows with VBA enabled.
-The provincial results file and, for repeat status, the school's third-term results workbook, with the structure described in sections 3.1 and 4.2.
-Optional fonts: Dubai, Dubai Medium, Aptos Slab.
----
-11. Planned improvements
-Unmatched candidates in the repeat-status report. Each candidate that cannot be matched will be listed by sheet and by the number in column A, and the process will continue without interruption. Currently the report gives counts only.
----
-## 12. Validation and Operational Status
 
-**<span style="color:green">Successfully tested and operational</span>**
+Each stage has its own execution status and detailed result information.
 
-All VBA modules in this repository have been successfully tested in Microsoft Excel. Their functionality and integration have been verified, and all components are confirmed to be working as intended.
+When the stages are executed through the master processing command, the next stage starts only after the previous stage has explicitly reported success.
 
-The validation covers the complete workflow and its main components:
+A missing status report is treated as a failure. The workflow does not infer success from a macro returning normally or from the existence of a recently created file.
+
+---
+
+## 3. Modules and Responsibilities
+
+| Stage | Module | Macro | Responsibility |
+|---|---|---|---|
+| 1 | `modBacEtab` | `Run_BacEtab` | Extract candidates, group them by série, rank them, and generate the school workbook. |
+| 2 | `modStudentRepetitionStatus` | `Run_RepeatStatus` | Retrieve and transfer candidates' repeat status. |
+| 3 | `modBacAnalysis` | `Run_BacAnalysis` | Generate per-série statistical tables and the `Gen` summary sheet. |
+| Interface | `modBuildBacPanel` | `BuildBacPanel` | Build the BAC control interface and coordinate the processing workflow. |
+
+The extraction module publishes the generated school workbook path through the session variable `gLastBacEtabPath`.
+
+Stages 2 and 3 can use this path as their default target, avoiding unnecessary manual file selection when the workflow is executed in sequence.
+
+---
+
+## 4. Stage 1 — School Results Extraction
+
+**Module:** `modBacEtab`  
+**Macro:** `Run_BacEtab`
+
+### 4.1 Input requirements
+
+| Item | Requirement |
+|---|---|
+| File | `BAC????ResultatsOriginal.xlsx`, where `????` represents the four-digit year. |
+| File selection | If several matching files exist, the latest year is selected. |
+| Location | The same folder as the saved tool workbook. |
+| Preferred worksheet | `Data`. |
+| Fallback worksheet | The first worksheet containing the required headers `Cd_etab` and `Cd_serie`. |
+
+Required headers in row 1:
+
+`Cd_etab`, `Cd_serie`, `Nom`, `Prenom`, `Date_jour`, `Date_mois`, `Date_annee`, `Sexe`, `Eps`, `Notef1` … `Notef11`, `Moyenne`, `MoyenneMe`.
+
+Optional header: `Desi`.
+
+Columns are resolved by header name rather than fixed position. Consequently, the provincial file's column positions and overall width do not need to remain constant.
+
+The source data is read into a memory array and processed there. The provincial workbook is opened read-only and closed without saving.
+
+### 4.2 Processing
+
+The user enters the school's national establishment code (`Cd_etab`) through the `frmEtabCode` dialog.
+
+If the form is unavailable, a standard `InputBox` is used.
+
+The input is validated for:
+
+- Non-empty value.
+- Numeric characters only.
+- Maximum permitted length.
+- Normalisation of Arabic-Indic digits.
+
+All rows matching the establishment code are selected.
+
+A distinction is made between:
+
+- A code that does not exist in the provincial file.
+- A code that exists but has candidates only in series outside the supported range (30–38).
+
+In either case, the user receives a specific message and is prompted again.
+
+Each candidate is assigned to a *série* according to `Cd_serie`.
+
+The marks (`Eps`, `Notef1` … `NotefN`) and averages (`Moyenne`, `MoyenneMe`) are transferred. The positional mark columns are mapped to subject names through a predefined mapping table keyed by `Cd_serie`.
+
+Unused `Notef` positions are excluded completely: no corresponding subject column is created and no data is transferred.
+
+Candidates are sorted by `Moyenne` in descending order using a stable sort. Column A is then numbered sequentially from 1.
+
+The output contains one worksheet for each *série* represented among the school's candidates.
+
+### 4.3 Data transformations
+
+- `Nom` and `Prenom` are combined into one full-name column.
+- `Date_jour`, `Date_mois`, and `Date_annee` are combined into a birth-date value.
+- Birth dates are formatted as `yyyy-mm-dd` and stored as text.
+- Sex is transferred from `Sexe`.
+
+### 4.4 Supported series
+
+| Code | Sheet Série | Série | Subject columns |
+|---|---|---|---:|
+| 30 | Philo | Literature and Philosophy | 8 |
+| 31 | LaEtr | Foreign Languages | 9 |
+| 32 | GeEc | Management and Economics | 11 |
+| 33 | SE | Experimental Sciences | 10 |
+| 34 | Math | Mathematics | 10 |
+| 35 | TGM | Technical Mathematics – Mechanical Engineering | 10 |
+| 36 | TGE | Technical Mathematics – Electrical Engineering | 10 |
+| 37 | TGC | Technical Mathematics – Civil Engineering | 10 |
+| 38 | TGP | Technical Mathematics – Process Engineering | 10 |
+
+Subject names use unified Arabic spellings to ensure consistent headers across the different series.
+
+### 4.5 Output worksheet layout
+
+| Column | Content |
+|---|---|
+| A | Rank after descending average sort |
+| B | Full name |
+| C | Birth date |
+| D | Sex |
+| E | Repeater flag, populated in Stage 2 |
+| F | Physical education (`Eps`) |
+| G onward | Subject marks for the relevant série |
+| Penultimate | General average (`Moyenne`) |
+| Last | Core-subject average (`MoyenneMe`) |
+
+Formatting and layout:
+
+- Right-to-left worksheet direction.
+- Excel table named `T_<sheet>`.
+- Print-ready landscape orientation, fitted to one page wide.
+- Column A width: 4.3.
+- Columns D through the last data column: width 6.3.
+- Row 1 height: 40.
+- Row 2 height: 100, with rotated subject headers.
+- Dubai / Dubai Medium for text.
+- Aptos Slab for numeric values.
+- Automatic fallback to Arial / Calibri when the preferred fonts are unavailable.
+
+The final layout is applied and verified by reading the values back. Any deviation is reported.
+
+### 4.6 Output file naming
+
+The workbook is saved as `.xlsx` in the tool folder.
+
+The filename is based on the school's `Desi` value, sanitised and truncated to a maximum of 150 characters.
+
+If `Desi` is unavailable, the fallback name is:
+
+`BAC<year>_<code>`
+
+Existing files are never overwritten. Sequential suffixes are added when necessary:
+
+`_02`, `_03`, and so on.
+
+---
+
+## 5. Stage 2 — Repeat Status Processing
+
+**Module:** `modStudentRepetitionStatus`  
+**Macro:** `Run_RepeatStatus`
+
+The provincial BAC file does not contain the candidates' repeat status.
+
+This stage retrieves that information from the school's third-term results workbook, generated by the tools in the `ResultsAnalysisTerm03` project, and writes it into column E of the school BAC workbook.
+
+All repeat-status data is collected and processed in memory. No intermediate data file is required.
+
+The source workbook is never modified.
+
+### 5.1 Workflow
+
+**Source workbook**
+
+The user selects the third-term results workbook. Its filename and location may vary, but its worksheet structure must match the format produced by the Term03 tools.
+
+**Target workbook**
+
+The user selects the workbook to receive the repeat-status values.
+
+If a school BAC workbook was generated during the current session, it is offered as the default:
+
+- Yes: use the current session workbook.
+- No: select another workbook.
+- Cancel: stop the operation.
+
+The source records are collected, target candidates are matched, and the resulting statuses are written to column E.
+
+### 5.2 Source data extraction
+
+Only worksheets whose merged cell `H1` starts with the third-year secondary prefix:
+
+`ثالثة ثانوي`
+
+are processed.
+
+Other worksheets are ignored.
+
+The final three characters of `H1` (a space followed by two digits) are removed to obtain the branch group.
+
+Worksheets belonging to the same group are pooled. Each group is mapped to its corresponding BAC série code (`Philo`, `LaEtr`, etc.) using keywords in the worksheet title.
+
+The following conditions stop the operation with an explicit error:
+
+- An unrecognised worksheet title.
+- Two different groups mapping to the same série code.
+
+Data is read from row 3:
+
+| Column | Content |
+|---|---|
+| B | Full name |
+| C | Date of birth |
+| E | Repeat status (`نعم` / `لا`) |
+
+Duplicate source records are retained for matching and ambiguity detection.
+
+### 5.3 Candidate matching
+
+Matching is performed within the target worksheet corresponding to the same série code.
+
+The matching identity consists of:
+
+- Normalised full name.
+- Normalised date of birth.
+
+**Name normalisation**
+
+The normalisation procedure includes:
+
+- Unifying Alef variants.
+- Folding Taa Marbuta into Haa.
+- Removing diacritics and Tatweel.
+- Removing extra, leading, trailing, and non-breaking spaces.
+
+**Date normalisation**
+
+Dates are converted to a common `yyyymmdd` representation.
+
+The procedure supports dates stored as Excel date values or as text using `/`, `-`, or `.` separators.
+
+**Matching outcomes**
+
+| Matching condition | Action |
+|---|---|
+| Exact identity match with a single valid status | Transfer the status. |
+| Multiple exact source records with identical valid statuses | Transfer the common status. |
+| One-character spelling discrepancy with matching date of birth and a unique candidate | Transfer the status and flag the discrepancy for review. |
+| Multiple plausible candidates | Do not transfer. |
+| Contradictory source statuses | Do not transfer. |
+| Invalid status | Do not transfer. |
+| Incomplete identity or date-of-birth mismatch | Do not transfer. |
+
+A one-character discrepancy is not automatically rejected. It is accepted only when the date of birth matches and the candidate is uniquely identifiable.
+
+Such transfers are reported as:
+
+`Transferred with Name Discrepancy`
+
+This allows the person responsible for the operation to review the spelling difference without unnecessarily losing a valid match.
+
+Ambiguous cases are never resolved automatically.
+
+### 5.4 Safe writing and backup handling
+
+Only values are written to column E, starting at row 3.
+
+Candidates that cannot be matched retain their existing cell contents.
+
+The operation follows a transactional approach:
+
+1. Collect and validate all source records.
+2. Calculate all matching outcomes in memory.
+3. Create a temporary, timestamped backup of the target workbook beside the original.
+4. Apply the calculated values to the target.
+5. Save the target workbook.
+6. Verify that the updated workbook was saved successfully.
+7. Delete the temporary backup only after successful saving and verification.
+
+**Failure handling**
+
+The temporary backup is retained if data transfer, saving, or verification fails.
+
+The target is never modified until the complete matching computation has succeeded.
+
+Additional safeguards:
+
+- Source and target must be different files.
+- The target must not be read-only.
+- Macros in workbooks opened during the operation are disabled.
+- Excel application settings are restored after completion, cancellation, or failure.
+
+### 5.5 Repeat-status report
+
+The operation generates a report containing the matching results, including:
+
+- Exact matches.
+- One-character spelling discrepancies transferred with a warning.
+- Unmatched candidates.
+- Ambiguous cases.
+- Target worksheets with no corresponding source worksheet.
+- Relevant execution details.
+
+The report provides an audit trail for the transfer and identifies cases requiring human review.
+
+### 5.6 Repeater identification in Stage 3
+
+A candidate is counted as a repeater when column E contains:
+
+`نعم`
+
+---
+
+## 6. Stage 3 — Statistical Analysis
+
+**Module:** `modBacAnalysis`  
+**Macro:** `Run_BacAnalysis`
+
+### 6.1 Workflow
+
+The module obtains the school workbook path from `gLastBacEtabPath`.
+
+If the path is empty or the file no longer exists, the user must select the workbook manually when running the module independently.
+
+A separate analysis copy is created next to the original:
+
+`تحليل نتائج <original name>.xlsx`
+
+The original school workbook is never modified.
+
+Existing output files are never overwritten. Sequential suffixes are added when necessary.
+
+For each série worksheet containing a valid data table, the analysis blocks are generated below the candidate data.
+
+A `Gen` worksheet is inserted as the first worksheet.
+
+All calculations are completed before generated formulas are converted into static values. The candidate data rows remain untouched.
+
+If the operation fails, the analysis copy is closed and deleted, and Excel application settings are restored.
+
+### 6.2 Statistical conventions
+
+- Only candidates with `Moyenne > 0` are included in the analysis.
+- An average of `0.00` represents an absent candidate.
+- The passing threshold is 10/20.
+- Subject pass rates use the number of present candidates with a valid mark in that subject as the denominator.
+- Subjects identified as Tamazight are excluded from the analysis tables.
+
+Number formats:
+
+| Data type | Format |
+|---|---|
+| Counts | `00` |
+| Decimal values | `00.00` |
+| Percentages | `[=1]%0;%00.00` |
+
+Population statistical measures are used:
+
+- Standard deviation: `STDEVP` / `STDEV.P`.
+- Variance: `VARP` / `VAR.P`.
+- Coefficient of variation: population standard deviation divided by the mean.
+
+### 6.3 Analysis blocks per série
+
+The analysis blocks begin two blank rows below the last candidate data row.
+
+Each block uses one column per subject, from physical education through the general average.
+
+**Counters strip**
+
+- Candidates analysed.
+- Male candidates.
+- Female candidates.
+- Repeaters.
+
+**Table 1 — Results**
+
+For each subject:
+
+- Subject average.
+- Passing females.
+- Passing males.
+- Total passing candidates.
+- Pass rate.
+- Highest mark.
+- Lowest mark.
+- Passing repeaters.
+
+**Table 2 — Statistical indicators**
+
+- Pass rate.
+- Mean.
+- Median.
+- Mode.
+- Range.
+- Standard deviation.
+- Variance.
+- Coefficient of variation.
+
+**Table 3 — Score distribution**
+
+Candidate counts across the following score bands:
+
+| Score band |
+|---|
+| Below 7 |
+| 7–8.99 |
+| 9–9.99 |
+| 10–11.99 |
+| 12–13.99 |
+| 14–15.99 |
+| 16–17.99 |
+| 18 and above |
+
+### 6.4 General summary — `Gen`
+
+The `Gen` worksheet consolidates the school's results.
+
+It contains seven sections:
+
+1. **Candidate population:** Registered, present, male, female, and absent candidates per série, with totals.
+2. **General results:** Present candidates, passed candidates (total, male, and female), and pass rate per série.
+3. **Pass rate by sex.**
+4. **Repeaters:** Number of repeaters, repeaters who passed, and their pass rate per série.
+5. **Provincial and national comparison:** School pass rate compared with provincial and national rates. Reference rates and ranking are left for manual entry.
+6. **Historical comparison:** School pass rate compared with the previous five examination sessions. Historical values are left for manual entry.
+7. **Repeaters by sex:** Counts, passed candidates, and pass rates.
+
+---
+
+## 7. Control Interface and Workflow Orchestration
+
+**Module:** `modBuildBacPanel`
+
+The BAC workflow is integrated into the Term03 data-processing interface.
+
+The master command:
+
+**Process Baccalaureate Results**  
+`معالجة نتائج البكالوريا`
+
+is placed in its own row at the top of the Term03 processing panel.
+
+This placement follows the source-oriented organisation of the tools: the Term03 processing workflow and the BAC repeat-status workflow share the `Source03` raw-data directory.
+
+The master command coordinates the three BAC stages:
+
+1. Extract school results.
+2. Fetch repeat status.
+3. Analyse school results.
+
+The individual stage commands remain available for independent execution. The master command does not replace them.
+
+### 7.1 Explicit execution status
+
+Each processing module exposes its own execution status and details.
+
+| Module | Status interface |
+|---|---|
+| `modBacEtab` | `BacEtab_SetAuto`, `BacEtab_LastStatus`, `BacEtab_LastDetail` |
+| `modStudentRepetitionStatus` | `RepeatStatus_SetAuto`, `RepeatStatus_LastStatus`, `RepeatStatus_LastDetail` |
+| `modBacAnalysis` | `BacAnalysis_SetAuto`, `BacAnalysis_LastStatus`, `BacAnalysis_LastDetail` |
+
+The status values are:
+
+| Status | Meaning |
+|---|---|
+| `OK` | The stage completed successfully. |
+| `Cancelled` | The user or operation cancelled the stage. |
+| `Failed` | The stage encountered an error or could not complete its required operation. |
+
+The orchestrator uses `RunStage()` to execute each stage in automatic mode and retrieve its reported status and details.
+
+A missing status report is treated as a failure.
+
+### 7.2 Stop-on-failure behaviour
+
+The master workflow stops immediately when a stage returns anything other than `OK`.
+
+It never proceeds to a later stage after a failure or cancellation.
+
+The final report identifies:
+
+- Successfully completed stages.
+- The stage that failed or was cancelled.
+- The reported reason.
+- Subsequent stages that were skipped.
+
+This prevents incomplete or invalid intermediate results from being treated as successful workflow outputs.
+
+### 7.3 Interface feedback
+
+The control interface provides non-blocking execution feedback:
+
+- A status indicator beneath each stage button.
+- A status bar showing the current workflow state.
+- Updated indicators after independent manual execution.
+- A consolidated final report after the master workflow completes.
+- The panel is brought to the foreground when a failure or cancellation occurs.
+
+Success dialogs are suppressed during automatic execution to avoid interrupting the coordinated workflow. The master command presents the final consolidated report instead.
+
+A busy flag prevents re-entrant execution and overlapping processing operations.
+
+---
+
+## 8. Repository Contents
+
+The repository contains exported VBA source code and project documentation.
+
+| File | Role |
+|---|---|
+| `modBacEtab.bas` | Stage 1 — School results extraction and ranking. |
+| `modStudentRepetitionStatus.bas` | Stage 2 — Repeat-status matching and transfer. |
+| `modBacAnalysis.bas` | Stage 3 — Statistical analysis and `Gen` summary. |
+| `modBuildBacPanel.bas` | Control interface and workflow orchestration. |
+| `frmEtabCode.frm` | Optional school-code input form. |
+| `frmEtabCode_code.txt` | Optional form code for manual installation. |
+| `ARCHITECTURE.md` | Project architecture and implementation documentation. |
+
+The repository does not contain school candidate datasets or provincial results workbooks.
+
+---
+
+## 9. Installation and Usage
+
+### 9.1 Requirements
+
+- Microsoft Excel for Windows.
+- VBA macros enabled.
+- The provincial BAC results file with the structure described in Section 4.
+- The school's third-term results workbook with the structure described in Section 5.
+- Optional fonts: Dubai, Dubai Medium, and Aptos Slab.
+
+### 9.2 Installation
+
+1. Create a macro-enabled Excel workbook (`.xlsm`) and save it in the intended working folder.
+2. Open the VBA editor.
+3. Import the `.bas` modules using **File → Import File**.
+4. Optionally install the school-code input form:
+   - Import `frmEtabCode.frm`, or
+   - Insert a blank UserForm named `frmEtabCode` and paste the code from `frmEtabCode_code.txt` into its code window.
+5. The form creates its controls at runtime; no designer layout is required.
+6. If the form is not installed, the extraction module uses a standard `InputBox`.
+7. Run `BuildBacPanel` once to create or initialise the control interface.
+
+### 9.3 Source files
+
+Place the provincial file in the same folder as the tool workbook:
+
+`BAC<year>ResultatsOriginal.xlsx`
+
+The Term03 source data must also be available in the expected `Source03` directory structure.
+
+### 9.4 Running the complete workflow
+
+Use the **Process Baccalaureate Results** command in the Term03 processing panel.
+
+The workflow executes:
+
+1. Extract school results and enter the establishment code.
+2. Fetch repeat status from the third-term results.
+3. Generate the statistical analysis workbook.
+
+The user receives a consolidated report showing the outcome of each stage.
+
+### 9.5 Independent execution
+
+Each stage can also be executed independently through its individual command.
+
+This allows users to run a specific operation without having to execute the complete workflow.
+
+---
+
+## 10. Technical Notes
+
+### Array-based processing
+
+The provincial data is read once into memory, filtered and transformed in memory, and written to the output worksheets in block assignments. This keeps processing practical for large provincial datasets.
+
+### Safe file handling
+
+- The provincial source is read-only.
+- The third-term source is never modified.
+- Existing output files are never overwritten.
+- Repeat-status processing uses a temporary backup and deletes it only after successful saving and verification.
+- The analysis stage works on a separate copy and removes that copy if processing fails.
+
+### Explicit status reporting
+
+Each stage reports its own execution outcome and error details.
+
+The orchestrator relies on these explicit reports rather than indirect success indicators.
+
+### Excel application-state restoration
+
+The processing modules restore the relevant Excel application settings after completion, cancellation, or failure, including:
+
+- `ScreenUpdating`
+- `EnableEvents`
+- `DisplayAlerts`
+- Status bar state
+
+### Static analysis values
+
+Generated analysis formulas are converted into values after calculation. This ensures that the final analysis workbook retains its results independently of subsequent changes to formulas or external workbook references.
+
+### Arabic text encoding
+
+Arabic strings are constructed using Unicode code points through the `ArHex` and `ArabicText` helpers because the VBA editor does not reliably preserve all Arabic literals.
+
+### Statistical compatibility
+
+The analysis uses standard Excel statistical functions such as `COUNTIFS`, `AVERAGEIFS`, and legacy array formulas. Dynamic-array functions are not required.
+
+---
+
+## 11. Validation and Operational Status
+
+**Status: Successfully tested and operational**
+
+All BACAnalysisTools modules have been tested in Microsoft Excel. The individual stages, their integration, the control interface, and the stop-on-failure mechanism have been verified through practical execution.
+
+### 11.1 Component validation
 
 | Component | Responsibility | Status |
 |---|---|---|
 | `modBacEtab` | School results extraction and candidate grouping | Passed |
-| `modRepeatStatus` | Student repetition-status processing and updating | Passed |
+| `modStudentRepetitionStatus` | Repeat-status processing and transfer | Passed |
 | `modBacAnalysis` | Statistical analysis and report generation | Passed |
-| `modBuildBacPanel` | Control panel creation and macro integration | Passed |
-| `frmEtabCode` | School code input and validation interface | Passed |
+| `modBuildBacPanel` | Control interface and workflow orchestration | Passed |
+| `frmEtabCode` | School-code input and validation | Passed |
 
-The successful tests confirm that the modules operate correctly within the intended Excel environment and that the integrated workflow performs its designated tasks.
+### 11.2 Workflow validation
 
-**Validation scope:** Manual testing in Microsoft Excel.
+The integrated workflow has been tested under successful and unsuccessful execution conditions.
 
-**Current status:** All repository modules are operational. No known blocking issues remain in the tested functionality.
+| Test scenario | Expected behaviour | Result |
+|---|---|---|
+| All three stages complete successfully | Generate the school workbook, transfer repeat status, and produce the analysis workbook | Passed |
+| A processing stage encounters an error | Stop the workflow immediately | Passed |
+| `Source03` is missing | Stop at the repeat-status stage and skip the analysis stage | Passed |
+| The source folder is restored with the correct name | Allow the workflow to run successfully | Passed |
+| Automatic execution | Display stage indicators and one consolidated final report | Passed |
+| Independent stage execution | Update the corresponding stage status indicator | Passed |
+
+### 11.3 Successful end-to-end execution
+
+A complete test run confirmed:
+
+- School results extracted successfully.
+- Five output worksheets generated.
+- 147 candidates extracted.
+- 145 repeat-status values matched.
+- Repeat-status report generated successfully.
+- Six worksheets generated in the analysis workbook.
+- All three stages reported successful completion.
+
+The difference between the extracted candidate count and the number of matched repeat-status values is reported for review; it is not automatically treated as a processing failure.
+
+### 11.4 Failure and recovery validation
+
+The workflow was also tested with the required `Source03` directory missing.
+
+The system:
+
+- Completed the extraction stage.
+- Detected the missing source directory during the repeat-status stage.
+- Reported the failing stage and the reason.
+- Stopped the workflow immediately.
+- Skipped the analysis stage.
+
+After restoring the correct `Source03` directory name, the complete workflow executed successfully.
+
+### 11.5 Operational conclusion
+
+The tests confirm that the toolkit handles both successful execution and expected failure conditions correctly.
+
+The coordinated workflow does not continue after a failed or cancelled stage, and it provides explicit execution feedback through the control interface and final report.
+
+**Validation scope:** Practical manual testing in Microsoft Excel.
+
+**Current status:** All tested repository components and the integrated BAC processing workflow are operational. No known blocking issues remain in the tested functionality.
+
+---
+
+## 12. Privacy and Repository Security
+
+The repository is intended to distribute the VBA source code and technical documentation, not school or candidate data.
+
+Before publishing changes, ensure that commits do not contain:
+
+- Candidate names or personal information.
+- Real student results or source workbooks.
+- Confidential school records.
+- Passwords, credentials, or other secrets.
+- Unintended local paths or private operational information.
+
+VBA source files and documentation should be reviewed before committing. The `.bas` extension alone does not guarantee that a file contains no sensitive information.
+
+---
+
+## 13. Planned Improvements
+
+Potential future enhancements include:
+
+- Detailed listing of unmatched candidates in the repeat-status report, including their worksheet and candidate rank.
+- More detailed presentation of ambiguous matching cases and their possible source candidates.
+- Further improvements to operational reporting and validation.
+
+These enhancements are separate from the currently tested core workflow.
+
+---
+
+## About
+
+BACAnalysisTools is an Excel VBA toolkit designed to automate the extraction, completion, and statistical analysis of school-level Baccalaureate results.
+
+It focuses on reliable processing, modular execution, safe file handling, and transparent reporting throughout the workflow.
+
+**Language:** VBA  
+**Platform:** Microsoft Excel for Windows  
+**Project:** BACAnalysisTools  
+**Repository:** [SprstarSource/BACAnalysisTools](https://github.com/SprstarSource/BACAnalysisTools)
