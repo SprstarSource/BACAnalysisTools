@@ -84,7 +84,7 @@ Public Sub Run_BacEtab()
         Err.Raise vbObjectError + 902, "modBacEtab", Ar("no_source") & vbLf & SOURCE_PATTERN & vbLf & folder
     End If
     sourcePath = folder & Application.PathSeparator & sourceName
-    prefill = "47000000"
+    prefill = "01234567"
 
     Do
         If Not AskCode(prefill, errMsg, sourceName, codeText) Then
