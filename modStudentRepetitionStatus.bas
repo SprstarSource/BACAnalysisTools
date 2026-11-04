@@ -1,4 +1,4 @@
-Attribute VB_Name = "modRepeatStatus"
+Attribute VB_Name = "modStudentRepetitionStatus"
 Option Explicit
 
 ' =====================================================================
@@ -9,7 +9,7 @@ Option Explicit
 ' prepares them in memory with the same steps as Collector01 (conversion of the
 ' web-exported files to .xlsx, then collection) - no results file is created -
 ' and writes the repeat status (Yes / No) into column E of the extraction
-' workbook (TARGET, values only, after a timestamped backup).
+' workbook (TARGET, values only; a temporary backup is deleted after a verified save).
 '
 ' MATCH   : same sheet code + normalized name (col B) + date of birth
 '           (col C). EXACT matching only (no fuzzy matching).
@@ -17,7 +17,7 @@ Option Explicit
 '           (SE pools the two source sheets "... 01" and "... 02").
 ' ORDER   : 1) read Source03 and detect duplicate identities
 '           2) per target sheet: detect duplicates, then match
-'           3) ask for confirmation, backup, write, save
+'           3) ask for confirmation, temporary backup, write, save, verify, delete backup
 '           4) create a separate report workbook (summary + details)
 ' REPORT  : locations are written as "SheetCode: number in column A",
 '           e.g. SE: 41
@@ -151,6 +151,7 @@ Public Sub Run_RepeatStatus()
     Dim srcFolder As String, srcList As String, lineTxt As String, srcLines() As String
     Dim srcCopied As Long, srcSkipped As Long
     Dim convTotal As Long, convOK As Long, convFailed As Long
+    Dim backupNote As String, tBeforeSave As Date
 
     On Error GoTo FatalError
 
@@ -343,15 +344,27 @@ Public Sub Run_RepeatStatus()
                 End If
             Next i
         Next key
+        tBeforeSave = Now
         wbTarget.Save
-        saved = True
+        saved = TargetSaveVerified(wbTarget, tBeforeSave)
+
+        ' the backup is removed ONLY after a verified save
+        If saved Then
+            If DeleteBackupFile(backupPath) Then
+                backupNote = Ar("bk_deleted")
+            Else
+                backupNote = Ar("bk_delfail") & " " & backupPath
+            End If
+        Else
+            backupNote = Ar("bk_keep") & " " & backupPath
+        End If
     End If
 
     ' =================================================================
     ' PHASE 4: report workbook (separate file, target structure untouched)
     ' =================================================================
     Application.StatusBar = Ar("sb_report")
-    reportPath = BuildReport(folder, stamp, sourcePath, targetPath, backupPath, saved, _
+    reportPath = BuildReport(folder, stamp, sourcePath, targetPath, backupNote, doWrite, _
                              includedSheets, skippedSrc, ignoredSheets, skippedTgt, groups.Count, setCount)
     GoTo CleanExit
 
@@ -374,12 +387,19 @@ CleanExit:
     On Error GoTo 0
 
     If Len(fatalText) > 0 Then
+        If Len(backupPath) > 0 Then
+            If FileExistsPath(backupPath) Then
+                fatalText = fatalText & vbLf & vbLf & Ar("bk_keep") & vbLf & backupPath
+            End If
+        End If
         ShowMsg Ar("stopped") & vbLf & fatalText, vbExclamation
         Exit Sub
     End If
 
     If saved Then
         report = Ar("done")
+    ElseIf doWrite Then
+        report = Ar("save_unver")
     Else
         report = Ar("no_change")
     End If
@@ -396,7 +416,7 @@ CleanExit:
     report = report & vbLf & Ar("src_files") & srcCopied & "  |  " & Ar("r_conv") & convOK & "/" & convTotal
     If srcSkipped > 0 Then report = report & "  |  " & Ar("r_srcbad") & srcSkipped
     If skippedSrc > 0 Then report = report & vbLf & Ar("src_skipped") & skippedSrc
-    If saved Then report = report & vbLf & vbLf & Ar("r_backup") & vbLf & backupPath
+    If doWrite Then report = report & vbLf & vbLf & Ar("r_backup") & vbLf & backupNote
     If Len(reportPath) > 0 Then
         report = report & vbLf & vbLf & Ar("r_report") & vbLf & reportPath
     Else
@@ -677,7 +697,7 @@ End Sub
 ' Creates a separate report workbook next to the target file.
 ' Returns its path, or "" when it could not be created.
 Private Function BuildReport(ByVal folder As String, ByVal stamp As String, _
-        ByVal sourcePath As String, ByVal targetPath As String, ByVal backupPath As String, _
+        ByVal sourcePath As String, ByVal targetPath As String, ByVal backupNote As String, _
         ByVal wrote As Boolean, ByVal incSheets As Long, ByVal skipSheets As Long, _
         ByVal ignSheets As Long, ByVal skipTgt As Long, ByVal groupCount As Long, _
         ByVal setCount As Long) As String
@@ -705,7 +725,7 @@ Private Function BuildReport(ByVal folder As String, ByVal stamp As String, _
     KV sm, k, Ar("r_source"), sourcePath
     KV sm, k, Ar("r_target"), targetPath
     If wrote Then
-        KV sm, k, Ar("r_backup"), backupPath
+        KV sm, k, Ar("r_backup"), backupNote
     Else
         KV sm, k, Ar("no_change"), ""
     End If
@@ -756,9 +776,8 @@ Private Function BuildReport(ByVal folder As String, ByVal stamp As String, _
         Next s
         wsS.Cells(k + 3, 1).Resize(setCount, 12).Value = br
     End If
-    wsS.Columns(1).ColumnWidth = 48
-    wsS.Columns("B:L").ColumnWidth = 18
     wsS.Range("A1:A" & k).Font.Bold = True
+    FormatSummarySheet wsS, k + 1, k + 2     ' k + 2 = header row of the branch table (row 25)
 
     ' ---------- details ----------
     wsL.Columns(3).NumberFormat = "@"
@@ -809,6 +828,107 @@ Fail:
     On Error Resume Next
     If Not wb Is Nothing Then wb.Close SaveChanges:=False
 End Function
+
+' ---------------------------------------------------------------------
+' Summary sheet formatting (applied to this sheet only)
+' ---------------------------------------------------------------------
+Private Sub FormatSummarySheet(ByVal ws As Worksheet, ByVal mergeLastRow As Long, _
+                               ByVal rotateRow As Long)
+    Const SCRATCH_COL As Long = 200
+    Const SUM_LAST_COL As Long = 12          ' summary sheet uses A:L
+    Dim r As Long, c As Long, w As Double
+    Dim needL As Double, needR As Double, hdrW As Double
+    Dim prevAlerts As Boolean
+
+    prevAlerts = Application.DisplayAlerts
+    Application.DisplayAlerts = False
+
+    ' 1) move B -> E BEFORE merging, so nothing is lost
+    For r = 1 To mergeLastRow
+        If Not IsEmpty(ws.Cells(r, 2).Value) Then
+            ws.Cells(r, 5).Value = ws.Cells(r, 2).Value
+            ws.Cells(r, 2).ClearContents
+        End If
+    Next r
+
+    ' 2) merge A:D and E:H
+    For r = 1 To mergeLastRow
+        ws.Range(ws.Cells(r, 1), ws.Cells(r, 4)).Merge
+        ws.Range(ws.Cells(r, 5), ws.Cells(r, 8)).Merge
+    Next r
+
+    ' 3) general alignment
+    With ws.Cells
+        .HorizontalAlignment = xlCenter
+        .VerticalAlignment = xlCenter
+    End With
+
+    ' 4) wrap text + rotate up on the header row
+    With ws.Rows(rotateRow)
+        .WrapText = True
+        .Orientation = xlUpward
+    End With
+
+    ' 5) measure the text of the merged areas and of the rotated headers
+    For r = 1 To mergeLastRow
+        w = MeasureColWidth(ws, ws.Cells(r, 1).Value, True, SCRATCH_COL)
+        If w > needL Then needL = w
+        w = MeasureColWidth(ws, ws.Cells(r, 5).Value, False, SCRATCH_COL)
+        If w > needR Then needR = w
+    Next r
+    For c = 1 To SUM_LAST_COL
+        w = MeasureColWidth(ws, ws.Cells(rotateRow, c).Value, True, SCRATCH_COL)
+        If w > hdrW Then hdrW = w
+    Next c
+    ws.Columns(SCRATCH_COL).Delete
+
+    ' 6) AutoFit: height of the rotated row first, then the columns
+    '    (AutoFit ignores merged cells, so they are widened afterwards)
+    If hdrW > 0 Then
+        w = hdrW * 5.4 + 8
+        If w > 409 Then w = 409
+        ws.Rows(rotateRow).RowHeight = w
+    End If
+    ws.Range(ws.Columns(1), ws.Columns(SUM_LAST_COL)).AutoFit
+
+    GrowRangeWidth ws, 1, 4, needL + 2
+    GrowRangeWidth ws, 5, 8, needR + 2
+
+    Application.DisplayAlerts = prevAlerts
+End Sub
+
+' Width (in column units) needed by a text on one line; uses a scratch column
+Private Function MeasureColWidth(ByVal ws As Worksheet, ByVal v As Variant, _
+                                 ByVal isBold As Boolean, ByVal scratchCol As Long) As Double
+    Dim s As String
+    If IsError(v) Or IsNull(v) Or IsEmpty(v) Then Exit Function
+    s = CStr(v)
+    If Len(s) = 0 Then Exit Function
+    With ws.Cells(1, scratchCol)
+        .NumberFormat = "@"
+        .WrapText = False
+        .Orientation = xlHorizontal
+        .Font.Bold = isBold
+        .Value = s
+    End With
+    ws.Columns(scratchCol).AutoFit
+    MeasureColWidth = ws.Columns(scratchCol).ColumnWidth
+    ws.Cells(1, scratchCol).ClearContents
+End Function
+
+' Widens columns c1..c2 equally when their total width is below needW
+Private Sub GrowRangeWidth(ByVal ws As Worksheet, ByVal c1 As Long, ByVal c2 As Long, _
+                           ByVal needW As Double)
+    Dim c As Long, have As Double, add As Double
+    For c = c1 To c2
+        have = have + ws.Columns(c).ColumnWidth
+    Next c
+    If needW <= have Then Exit Sub
+    add = (needW - have) / (c2 - c1 + 1)
+    For c = c1 To c2
+        ws.Columns(c).ColumnWidth = ws.Columns(c).ColumnWidth + add
+    Next c
+End Sub
 
 ' "SE: 41" (number in column A); falls back to the row number
 Private Function LocText(ByVal code As String, ByVal aVal As String, ByVal rowNo As Long) As String
@@ -1170,8 +1290,22 @@ Private Function Ar(ByVal key As String) As String
             s = ArHex("627 643 62A 645 644 62A 20 627 644 645 637 627 628 642 629 20 648 644 645 20 64A 64F 639 62F 64E 651 644 20 623 64A 20 634 64A 621 20 628 639 62F 2E 20 639 62F 62F 20 627")
             s = s & ArHex("644 642 64A 645 20 627 644 62A 64A 20 633 62A 64F 643 62A 628 20 641 64A 20 627 644 639 645 648 62F 20 45 3A 20")
         Case "c_yes"
-            s = ArHex("646 639 645 3A 20 643 62A 627 628 629 20 627 644 642 64A 645 20 648 62D 641 638 20 627 644 645 644 641 20 28 645 639 20 646 633 62E 629 20 627 62D 62A 64A 627 637 64A 629")
-            s = s & ArHex("29")
+            s = ArHex("646 639 645 3A 20 643 62A 627 628 629 20 627 644 642 64A 645 20 648 62D 641 638 20 627 644 645 644 641 20")
+            s = s & ArHex("28 645 639 20 646 633 62E 629 20 627 62D 62A 64A 627 637 64A 629 20 645 624 642 62A 629 20 62A 64F 62D 630")
+            s = s & ArHex("641 20 628 639 62F 20 646 62C 627 62D 20 627 644 62D 641 638 29")
+        Case "bk_deleted"
+            s = ArHex("62D 64F 630 641 62A 20 646 647 627 626 64A 627 64B 20 628 639 62F 20 627 644 62A 623 643 62F 20 645 646 20")
+            s = s & ArHex("646 62C 627 62D 20 627 644 62D 641 638 2E")
+        Case "bk_delfail"
+            s = ArHex("62A 639 630 631 20 62D 630 641 20 627 644 646 633 62E 629 20 627 644 627 62D 62A 64A 627 637 64A 629 60C 20")
+            s = s & ArHex("627 62D 630 641 647 627 20 64A 62F 648 64A 627 64B 3A")
+        Case "bk_keep"
+            s = ArHex("627 644 646 633 62E 629 20 627 644 627 62D 62A 64A 627 637 64A 629 20 645 62D 641 648 638 629 20 644 627 633")
+            s = s & ArHex("62A 639 627 62F 629 20 627 644 628 64A 627 646 627 62A 3A")
+        Case "save_unver"
+            s = ArHex("644 645 20 64A 62A 623 643 62F 20 646 62C 627 62D 20 62D 641 638 20 645 644 641 20 627 644 644 635 642 60C")
+            s = s & ArHex("20 644 630 644 643 20 623 64F 628 642 64A 62A 20 627 644 646 633 62E 629 20 627 644 627 62D 62A 64A 627 637")
+            s = s & ArHex("64A 629 2E")
         Case "c_no"
             s = ArHex("644 627 3A 20 639 62F 645 20 62A 639 62F 64A 644 20 627 644 645 644 641 60C 20 645 639 20 625 646 634 627 621 20 627 644 62A 642 631 64A 631 20 641 642 637")
         Case "done"
@@ -1421,6 +1555,32 @@ End Function
 ' ==============================================================================
 ' HELPERS
 ' ==============================================================================
+' True only when the save really happened: Saved flag, file present, not empty, fresh timestamp
+Private Function TargetSaveVerified(ByVal wb As Workbook, ByVal savedAfter As Date) As Boolean
+    Dim fp As String
+    On Error GoTo Bad
+    If Not wb.Saved Then Exit Function
+    fp = wb.FullName
+    If LCase$(Left$(fp, 4)) = "http" Then Exit Function
+    If Not FileExistsPath(fp) Then Exit Function
+    If FileLen(fp) = 0 Then Exit Function
+    If FileDateTime(fp) < DateAdd("s", -5, savedAfter) Then Exit Function
+    TargetSaveVerified = True
+    Exit Function
+Bad:
+    TargetSaveVerified = False
+End Function
+
+Private Function DeleteBackupFile(ByVal p As String) As Boolean
+    If Len(p) = 0 Then Exit Function
+    On Error Resume Next
+    SetAttr p, vbNormal
+    Kill p
+    Err.Clear
+    DeleteBackupFile = Not FileExistsPath(p)
+    On Error GoTo 0
+End Function
+
 Private Function FileExistsPath(ByVal p As String) As Boolean
     On Error Resume Next
     FileExistsPath = ((GetAttr(p) And vbDirectory) = 0)
