@@ -1,6 +1,15 @@
 Attribute VB_Name = "modRepeatingStudents01"
 Option Explicit
 
+Private g_ActiveArabicFont As String
+Private g_ActiveNumericFont As String
+
+Private Const HEADER_ROW_HEIGHT As Double = 30
+Private Const HEADER_FONT_SIZE As Long = 16
+
+Private Const PREFERRED_FONT As String = "Dubai"
+Private Const FALLBACK_FONT As String = "Arial"
+
 '==============================================================================
 ' Module  : RepeatingStudents01
 ' Purpose : Special copy of Collector01 for the THIRD-YEAR repeating students.
@@ -134,7 +143,7 @@ End Function
 Private Function StripSectionNumber(ByVal s As String) As String
     Dim rx As Object
     Set rx = CreateObject("VBScript.RegExp")
-    rx.Pattern = "\s*[0-9\u0660-\u0669]+\s*$"
+    rx.pattern = "\s*[0-9\u0660-\u0669]+\s*$"
     rx.Global = False
     StripSectionNumber = Trim(rx.Replace(s, ""))
 End Function
@@ -143,7 +152,7 @@ End Function
 Private Function SectionNumberOf(ByVal s As String) As Long
     Dim rx As Object, m As Object, d As String, i As Long
     Set rx = CreateObject("VBScript.RegExp")
-    rx.Pattern = "([0-9\u0660-\u0669]+)\s*$"
+    rx.pattern = "([0-9\u0660-\u0669]+)\s*$"
     If Not rx.Test(s) Then Exit Function
     Set m = rx.Execute(s)
     d = m(0).SubMatches(0)
@@ -160,7 +169,7 @@ Private Function ReplaceSectionWord(ByVal s As String) As String
     If Len(s) = 0 Then Exit Function
     Set rx = CreateObject("VBScript.RegExp")
     rx.Global = True
-    rx.Pattern = "(^|[\s:\-\u2013\u2014/])((?:\u0627\u0644|\u0644\u0644|\u0628\u0627\u0644|\u0648\u0627\u0644|\u0644|\u0628|\u0648)?)" & _
+    rx.pattern = "(^|[\s:\-\u2013\u2014/])((?:\u0627\u0644|\u0644\u0644|\u0628\u0627\u0644|\u0648\u0627\u0644|\u0644|\u0628|\u0648)?)" & _
                  "\u0642\u0633\u0645(?=$|[\s:\-\u2013\u2014/.,\u060C\u061B])"
     ReplaceSectionWord = rx.Replace(s, "$1$2" & ChrW(&H634) & ChrW(&H639) & ChrW(&H628) & ChrW(&H629))
 End Function
@@ -191,13 +200,13 @@ End Function
 
 ' Column of the term-3 average in a collected sheet (header holds "average" + "term",
 ' preferably with the digit 3 or the word for "third"); 0 when not found
-Private Function FindAverageColumn(ByVal ws As Worksheet, ByVal lastCol As Long) As Long
+Private Function FindAverageColumn(ByVal ws As Worksheet, ByVal LastCol As Long) As Long
     Dim c As Long, h As String, wAvg As String, wTerm As String, wThird As String
     Dim lastAny As Long, preferred As Long
     wAvg = NormAr(HexText("0645 0639 062F 0644"))
     wTerm = NormAr(HexText("0641 0635 0644"))
     wThird = NormAr(HexText("062B 0627 0644 062B"))
-    For c = 1 To lastCol
+    For c = 1 To LastCol
         h = NormAr(CellText(ws.Cells(TERM_HDR_ROW, c)))
         If InStr(h, wAvg) > 0 And InStr(h, wTerm) > 0 Then
             lastAny = c
@@ -266,7 +275,7 @@ Private Function WriteGroupSheet(ByVal wbTerm As Workbook, _
     Dim i As Long, r As Long, c As Long, p As Long
     Dim wsT As Worksheet, wsOut As Worksheet, lo As ListObject
     Dim secRows() As Long, secLast() As Long, secAvgCol() As Long
-    Dim total As Long, lastRow As Long, lastCol As Long
+    Dim total As Long, LastRow As Long, LastCol As Long
     Dim allData() As Variant, allAvg() As Double, idx() As Long
     Dim outData As Variant, tmp As Variant, avgArr As Variant
     Dim titleText As String, partTitle As String
@@ -281,12 +290,12 @@ Private Function WriteGroupSheet(ByVal wbTerm As Workbook, _
 
     For i = 1 To nSec
         Set wsT = wbTerm.Worksheets(secNames(i))
-        lastRow = LastUsedRow(wsT)
-        secLast(i) = lastRow
-        secRows(i) = lastRow - TERM_HDR_ROW
+        LastRow = LastUsedRow(wsT)
+        secLast(i) = LastRow
+        secRows(i) = LastRow - TERM_HDR_ROW
         If secRows(i) < 0 Then secRows(i) = 0
-        lastCol = wsT.Cells(TERM_HDR_ROW, wsT.Columns.Count).End(xlToLeft).Column
-        secAvgCol(i) = FindAverageColumn(wsT, lastCol)
+        LastCol = wsT.Cells(TERM_HDR_ROW, wsT.Columns.Count).End(xlToLeft).Column
+        secAvgCol(i) = FindAverageColumn(wsT, LastCol)
         total = total + secRows(i)
     Next i
 
@@ -565,7 +574,7 @@ Public Sub Run_RepeatingStudents01()
 
     ' ==================== Save (replace directly, no backup) ====================
     On Error Resume Next
-    wbOut.SaveAs Filename:=outPath, FileFormat:=xlOpenXMLWorkbook
+    wbOut.SaveAs fileName:=outPath, FileFormat:=xlOpenXMLWorkbook
     saveErr = Err.Number: saveDesc = Err.Description
     Err.Clear
     On Error GoTo UnexpectedError
@@ -632,7 +641,7 @@ Private Function SrcBuildWorkbook(ByVal srcFolder As String, _
                                   ByRef wbOut As Workbook, _
                                   ByRef copied As Long, _
                                   ByRef skipped As Long, _
-                                  ByRef skippedList As String, _
+                                  ByRef SkippedList As String, _
                                   ByRef convTotal As Long, _
                                   ByRef convSuccess As Long, _
                                   ByRef convFailed As Long) As Boolean
@@ -640,16 +649,16 @@ Private Function SrcBuildWorkbook(ByVal srcFolder As String, _
 
     SrcBuildWorkbook = False
     Set wbOut = Nothing
-    copied = 0: skipped = 0: skippedList = ""
+    copied = 0: skipped = 0: SkippedList = ""
     convTotal = 0: convSuccess = 0: convFailed = 0
 
     If LCase(Left(srcFolder, 4)) = "http" Then
-        skippedList = "  - The workbook is on OneDrive/SharePoint (URL path). Move it to a local folder first." & vbCrLf
+        SkippedList = "  - The workbook is on OneDrive/SharePoint (URL path). Move it to a local folder first." & vbCrLf
         Exit Function
     End If
     If Right(srcFolder, 1) <> "\" Then srcFolder = srcFolder & "\"
     If Dir(srcFolder, vbDirectory) = "" Then
-        skippedList = "  - Source03 folder not found: " & srcFolder & vbCrLf
+        SkippedList = "  - Source03 folder not found: " & srcFolder & vbCrLf
         Exit Function
     End If
 
@@ -668,7 +677,7 @@ Private Function SrcBuildWorkbook(ByVal srcFolder As String, _
     Set wb = Workbooks.Add
     Do While wb.Sheets.Count > 1: wb.Sheets(wb.Sheets.Count).Delete: Loop
 
-    SrcCollectAll wb, srcFolder, copied, skipped, skippedList
+    SrcCollectAll wb, srcFolder, copied, skipped, SkippedList
 
     If copied > 0 Then
         If wb.Sheets.Count > 1 Then
@@ -687,7 +696,7 @@ Done:
     Exit Function
 
 EH:
-    skippedList = skippedList & "  - Build failed: " & Err.Number & " : " & Err.Description & vbCrLf
+    SkippedList = SkippedList & "  - Build failed: " & Err.Number & " : " & Err.Description & vbCrLf
     On Error Resume Next
     If Not wb Is Nothing Then wb.Close SaveChanges:=False
     Set wbOut = Nothing
@@ -811,14 +820,14 @@ End Sub
 ' ==============================================================================
 ' Checks the Windows font registry (HKLM + HKCU). If the check itself cannot run,
 ' returns True (keeps the requested font instead of forcing the fallback).
-Private Function FontExists(ByVal FontName As String) As Boolean
+Private Function FontExists(ByVal fontName As String) As Boolean
     Const HKCU As Long = &H80000001
     Const HKLM As Long = &H80000002
     Dim reg As Object, hv As Variant
     Dim names As Variant, types As Variant
     Dim i As Long, p As Long, nm As String, enumOK As Boolean
 
-    On Error GoTo Fallback
+    On Error GoTo fallback
     Set reg = GetObject("winmgmts:{impersonationLevel=impersonate}!\\.\root\default:StdRegProv")
 
     For Each hv In Array(HKLM, HKCU)
@@ -831,8 +840,8 @@ Private Function FontExists(ByVal FontName As String) As Boolean
                     p = InStr(nm, " (")
                     If p > 0 Then nm = Left(nm, p - 1)          ' strip "(TrueType)" / "(OpenType)"
                     ' exact name, or family name of a variable font (e.g. "Bahnschrift" for "Bahnschrift SemiBold")
-                    If StrComp(nm, FontName, vbTextCompare) = 0 Then FontExists = True: Exit Function
-                    If StrComp(Left(FontName, Len(nm) + 1), nm & " ", vbTextCompare) = 0 Then FontExists = True: Exit Function
+                    If StrComp(nm, fontName, vbTextCompare) = 0 Then FontExists = True: Exit Function
+                    If StrComp(Left(fontName, Len(nm) + 1), nm & " ", vbTextCompare) = 0 Then FontExists = True: Exit Function
                 Next i
             End If
         End If
@@ -840,7 +849,7 @@ Private Function FontExists(ByVal FontName As String) As Boolean
 
     FontExists = Not enumOK     ' enumeration worked and nothing matched -> False; enumeration failed -> True
     Exit Function
-Fallback:
+fallback:
     FontExists = True
 End Function
 
@@ -1154,11 +1163,11 @@ Private Sub SplitAtSchoolYear(ByVal txt As String, _
     rx.IgnoreCase = True
 
     ' First choice: full school-year pattern (e.g. 2025-2026)
-    rx.Pattern = digit & "{4}\s*" & seps & "\s*" & digit & "{4}"
+    rx.pattern = digit & "{4}\s*" & seps & "\s*" & digit & "{4}"
 
     If Not rx.Test(txt) Then
         ' Fallback: a single 4-digit year
-        rx.Pattern = digit & "{4}"
+        rx.pattern = digit & "{4}"
         If Not rx.Test(txt) Then Exit Sub
     End If
 
