@@ -3,14 +3,16 @@ Option Explicit
 
 ' =====================================================================
 '  BAC results splitter  -  macro: Run_BacEtab
-'
-'  Notef1..N headers come from a hardcoded linguistic table keyed by
-'  Cd_serie (30..38). Empty Notef positions are skipped entirely
-'  (no column created, no data transferred). After the last subject:
-'  Moyenne then MoyenneMe as the final two columns.
+'  Updates:
+'   - Reads source files exclusively from subfolder "BacSource" (next to this tool).
+'   - Dynamic source file discovery: accepts any Excel filename/extension,
+'     selecting the file whose columns match LooksLikeData and LoadData.
+'   - Saves the output workbook inside folder "معالجة نتائج البكالوريا" (created if missing).
 ' =====================================================================
 
-Private Const SOURCE_PATTERN As String = "BAC????ResultatsOriginal.xlsx"
+Private Const SOURCE_FOLDER_NAME As String = "BacSource"
+Private Const OUT_FOLDER_NAME As String = "معالجة نتائج البكالوريا"
+Private Const OUT_FOLDER_ALT As String = "معالجه نتائج البكالوريا"
 Private Const SOURCE_SHEET As String = "Data"
 
 Private Const TITLE_ROW As Long = 1
@@ -34,15 +36,13 @@ Private Const FONT_SAFE_TEXT As String = "Arial"
 Private Const FONT_SAFE_NUM As String = "Calibri"
 
 Public gLastBacEtabPath As String
+Public gExtractedYear As String   ' Stores 4-digit year extracted from source filename if present
 
-' ---- run status (read by the control panel / main button) ----
-' The status is reported by this module itself: the caller never has to
-' assume that "the macro returned" means "the macro succeeded".
-Private Const ST_NONE As Long = 0       ' no report (the macro did not finish properly)
-Private Const ST_OK As Long = 1         ' finished successfully
-Private Const ST_CANCEL As Long = 2     ' cancelled by the user
-Private Const ST_FAIL As Long = 3       ' failed (reason in mDetail)
-Private mAuto As Boolean                ' automatic mode: no success message
+Private Const ST_NONE As Long = 0
+Private Const ST_OK As Long = 1
+Private Const ST_CANCEL As Long = 2
+Private Const ST_FAIL As Long = 3
+Private mAuto As Boolean
 Private mStatus As Long
 Private mDetail As String
 
@@ -58,8 +58,8 @@ Public Sub Run_BacEtab()
     Dim openedSource As Boolean, savedTarget As Boolean, Failed As Boolean
     Dim cancelled As Boolean, stateSaved As Boolean, loaded As Boolean
     Dim oldScreen As Boolean, oldEvents As Boolean, oldAlerts As Boolean, oldStatus As Variant
-    Dim errText As String, folder As String, sourceName As String, sourcePath As String
-    Dim yearText As String, outputPath As String, codeText As String
+    Dim errText As String, baseFolder As String, sourceFolder As String, sourceName As String, sourcePath As String
+    Dim yearText As String, outFolder As String, outputPath As String, codeText As String
     Dim prefill As String, errMsg As String, problems As String, summary As String
     Dim vals As Variant, codeNum As Double, total As Long, otherSeries As Long
     Dim cnt(1 To 9) As Long, grp() As Byte, data() As Variant, hdr(1 To 19) As Variant
@@ -68,6 +68,7 @@ Public Sub Run_BacEtab()
 
     mStatus = ST_NONE
     mDetail = ""
+    gExtractedYear = ""
     On Error GoTo Failed
     oldScreen = Application.ScreenUpdating
     oldEvents = Application.EnableEvents
@@ -78,13 +79,20 @@ Public Sub Run_BacEtab()
     Application.EnableEvents = False
     Application.DisplayAlerts = False
 
-    folder = ThisWorkbook.Path
-    If Len(folder) = 0 Then Err.Raise vbObjectError + 901, "modBacEtab", Ar("save_tool")
-    If Not FindSourceFile(folder, sourceName, yearText) Then
-        Err.Raise vbObjectError + 902, "modBacEtab", Ar("no_source") & vbLf & SOURCE_PATTERN & vbLf & folder
+    baseFolder = ThisWorkbook.Path
+    If Len(baseFolder) = 0 Then Err.Raise vbObjectError + 901, "modBacEtab", Ar("save_tool")
+    
+    sourceFolder = baseFolder & Application.PathSeparator & SOURCE_FOLDER_NAME & Application.PathSeparator
+    If Not FolderExists(sourceFolder) Then
+        Err.Raise vbObjectError + 902, "modBacEtab", Ar("no_src_folder") & vbLf & sourceFolder
     End If
-    sourcePath = folder & Application.PathSeparator & sourceName
-    prefill = "01234567"
+
+    If Not FindDynamicSourceFile(sourceFolder, sourceName, yearText) Then
+        Err.Raise vbObjectError + 902, "modBacEtab", Ar("no_source") & vbLf & sourceFolder
+    End If
+    gExtractedYear = yearText
+    sourcePath = sourceFolder & sourceName
+    prefill = "47000000"
 
     Do
         If Not AskCode(prefill, errMsg, sourceName, codeText) Then
@@ -137,8 +145,7 @@ Public Sub Run_BacEtab()
         End If
     Next k
 
-    ' Final layout pass on EVERY sheet (runs after all other formatting)
-    For Each ws In target.Worksheets
+    For Each ws in target.Worksheets
         nCols = LastDataCol(ws)
         ApplyLayout ws, nCols
         layoutIssues = layoutIssues & CheckLayout(ws, nCols)
@@ -146,11 +153,14 @@ Public Sub Run_BacEtab()
 
     target.Worksheets(1).Activate
 
+    outFolder = EnsureOutputFolder(baseFolder)
+    If Len(outFolder) = 0 Then Err.Raise vbObjectError + 908, "modBacEtab", Ar("no_out_folder")
+
     desiName = GetDesiValue(vals, codeNum)
     If Len(desiName) > 0 Then
-        outputPath = NewOutputPath(folder, SafeFileName(desiName))
+        outputPath = NewOutputPath(outFolder, SafeFileName(desiName))
     Else
-        outputPath = NewOutputPath(folder, "BAC" & yearText & "_" & Format$(codeNum, "0"))
+        outputPath = NewOutputPath(outFolder, "BAC" & IIf(Len(yearText) > 0, yearText, "Results") & "_" & Format$(codeNum, "0"))
     End If
 
     target.CheckCompatibility = False
@@ -185,7 +195,7 @@ Finished:
         mStatus = ST_OK
         mDetail = outputPath & vbLf & Ar("sheets") & ": " & sheetsMade & "  |  " & Ar("pupils") & ": " & total
         If Len(layoutIssues) > 0 Then mDetail = mDetail & vbLf & Ar("layout_warn") & layoutIssues
-        If Not mAuto Then       ' automatic mode: the main button shows ONE final report
+        If Not mAuto Then
             summary = Ar("done") & vbLf & outputPath & vbLf & _
                       Ar("sheets") & ": " & sheetsMade & vbLf & Ar("pupils") & ": " & total & vbLf
             For k = 1 To 9
@@ -204,9 +214,6 @@ Failed:
     Resume Finished
 End Sub
 
-' ---------------------------------------------------------------------
-'  Status API (used by modBuildBacPanel)
-' ---------------------------------------------------------------------
 Public Sub BacEtab_SetAuto(ByVal v As Boolean)
     mAuto = v
 End Sub
@@ -219,9 +226,6 @@ Public Function BacEtab_LastDetail() As String
     BacEtab_LastDetail = mDetail
 End Function
 
-' ---------------------------------------------------------------------
-'  Input dialog
-' ---------------------------------------------------------------------
 Private Function AskCode(ByVal prefill As String, ByVal errMsg As String, ByVal infoText As String, ByRef code As String) As Boolean
     Dim f As Object
     On Error Resume Next
@@ -262,25 +266,77 @@ Private Function AskCodeFallback(ByVal prefill As String, ByVal errMsg As String
 End Function
 
 ' ---------------------------------------------------------------------
-'  Source file / data loading
+' Dynamic Source Discovery inside "BacSource"
 ' ---------------------------------------------------------------------
-Private Function FindSourceFile(ByVal folder As String, ByRef fileName As String, ByRef yearText As String) As Boolean
-    Dim f As String, y As String, bestName As String, bestYear As String
-    f = Dir$(folder & Application.PathSeparator & SOURCE_PATTERN)
-    Do While Len(f) > 0
-        y = Mid$(f, 4, 4)
-        If y Like "####" Then
-            If y > bestYear Then
-                bestYear = y
-                bestName = f
+Private Function FolderExists(ByVal p As String) As Boolean
+    Dim fso As Object
+    On Error Resume Next
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    If Right$(p, 1) = Application.PathSeparator Then p = Left$(p, Len(p) - 1)
+    FolderExists = fso.FolderExists(p)
+    If Err.Number <> 0 Then FolderExists = False: Err.Clear
+End Function
+
+Private Function EnsureOutputFolder(ByVal baseFolder As String) As String
+    Dim fso As Object, p1 As String, p2 As String
+    On Error Resume Next
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    p1 = baseFolder & Application.PathSeparator & OUT_FOLDER_NAME
+    p2 = baseFolder & Application.PathSeparator & OUT_FOLDER_ALT
+    If fso.FolderExists(p1) Then
+        EnsureOutputFolder = p1
+        Exit Function
+    ElseIf fso.FolderExists(p2) Then
+        EnsureOutputFolder = p2
+        Exit Function
+    End If
+    fso.CreateFolder p1
+    If fso.FolderExists(p1) Then EnsureOutputFolder = p1
+    Err.Clear
+End Function
+
+Private Function ExtractYearFromName(ByVal fileName As String) As String
+    Dim rx As Object, matches As Object
+    Set rx = CreateObject("VBScript.RegExp")
+    rx.Pattern = "(19|20)\d{2}"
+    rx.Global = False
+    Set matches = rx.Execute(fileName)
+    If matches.Count > 0 Then ExtractYearFromName = matches(0).Value
+End Function
+
+' Scans all Excel files in BacSource folder; validates columns against LooksLikeData/LoadData
+Private Function FindDynamicSourceFile(ByVal folderPath As String, ByRef foundName As String, ByRef yearText As String) As Boolean
+    Dim fileName As String, fullPath As String, ext As String
+    Dim wbTest As Workbook, wsTest As Worksheet
+    Dim problems As String, dummyVals As Variant
+
+    fileName = Dir$(folderPath & "*.xls*")
+    Do While Len(fileName) > 0
+        If Left$(fileName, 2) <> "~$" Then
+            ext = LCase$(Mid$(fileName, InStrRev(fileName, ".") + 1))
+            If ext = "xlsx" Or ext = "xls" Or ext = "xlsm" Or ext = "xlsb" Then
+                fullPath = folderPath & fileName
+                On Error Resume Next
+                Set wbTest = Workbooks.Open(Filename:=fullPath, UpdateLinks:=0, ReadOnly:=True, IgnoreReadOnlyRecommended:=True, AddToMru:=False, Notify:=False)
+                If Not wbTest Is Nothing Then
+                    Set wsTest = FindDataSheet(wbTest)
+                    If Not wsTest Is Nothing Then
+                        If LoadData(wsTest, dummyVals, problems) Then
+                            foundName = fileName
+                            yearText = ExtractYearFromName(fileName)
+                            wbTest.Close SaveChanges:=False
+                            FindDynamicSourceFile = True
+                            Exit Function
+                        End If
+                    End If
+                    wbTest.Close SaveChanges:=False
+                End If
+                Err.Clear
+                On Error GoTo 0
             End If
         End If
-        f = Dir$
+        fileName = Dir$
     Loop
-    If Len(bestName) = 0 Then Exit Function
-    fileName = bestName
-    yearText = bestYear
-    FindSourceFile = True
 End Function
 
 Private Function OpenSource(ByVal fullPath As String, ByRef opened As Boolean) As Workbook
@@ -390,9 +446,6 @@ Private Function LoadData(ByVal ws As Worksheet, ByRef vals As Variant, ByRef pr
     LoadData = True
 End Function
 
-' ---------------------------------------------------------------------
-'  Matching and data preparation
-' ---------------------------------------------------------------------
 Private Function CountMatches(ByRef vals As Variant, ByVal codeNum As Double, ByRef cnt() As Long, _
                               ByRef grp() As Byte, ByRef other As Long) As Long
     Dim r As Long, n As Long, k As Long, c As Double, s As Double
@@ -460,21 +513,15 @@ Private Function SafeFileName(ByVal s As String) As String
     SafeFileName = s
 End Function
 
-' ---------------------------------------------------------------------
-'  Subject count per series (k = serie - 29)
-' ---------------------------------------------------------------------
 Private Function SubjectCount(ByVal k As Long) As Long
     Select Case k
-        Case 1: SubjectCount = 8     ' Serie 30
-        Case 2: SubjectCount = 9     ' Serie 31
-        Case 3: SubjectCount = 11    ' Serie 32
-        Case Else: SubjectCount = 10 ' Series 33..38
+        Case 1: SubjectCount = 8
+        Case 2: SubjectCount = 9
+        Case 3: SubjectCount = 11
+        Case Else: SubjectCount = 10
     End Select
 End Function
 
-' ---------------------------------------------------------------------
-'  Arabic subject names (18 unique, unified spellings, ArHex-coded)
-' ---------------------------------------------------------------------
 Private Function Subj(ByVal id As Long) As String
     Select Case id
         Case 1:  Subj = ArHex("627 644 644 63A 629 20 627 644 639 631 628 64A 629 20 648 622 62F 627 628 647 627")
@@ -498,12 +545,9 @@ Private Function Subj(ByVal id As Long) As String
     End Select
 End Function
 
-' ---------------------------------------------------------------------
-'  Notef header by (k, j) - j = 1..SubjectCount(k)
-' ---------------------------------------------------------------------
 Private Function NotefHeaderAr(ByVal k As Long, ByVal j As Long) As String
     Select Case k
-        Case 1 ' Serie 30 (8)
+        Case 1
             Select Case j
                 Case 1: NotefHeaderAr = Subj(1)
                 Case 2: NotefHeaderAr = Subj(2)
@@ -514,7 +558,7 @@ Private Function NotefHeaderAr(ByVal k As Long, ByVal j As Long) As String
                 Case 7: NotefHeaderAr = Subj(7)
                 Case 8: NotefHeaderAr = Subj(8)
             End Select
-        Case 2 ' Serie 31 (9)
+        Case 2
             Select Case j
                 Case 1: NotefHeaderAr = Subj(1)
                 Case 2: NotefHeaderAr = Subj(4)
@@ -526,7 +570,7 @@ Private Function NotefHeaderAr(ByVal k As Long, ByVal j As Long) As String
                 Case 8: NotefHeaderAr = Subj(7)
                 Case 9: NotefHeaderAr = Subj(8)
             End Select
-        Case 3 ' Serie 32 (11)
+        Case 3
             Select Case j
                 Case 1:  NotefHeaderAr = Subj(10)
                 Case 2:  NotefHeaderAr = Subj(11)
@@ -540,7 +584,7 @@ Private Function NotefHeaderAr(ByVal k As Long, ByVal j As Long) As String
                 Case 10: NotefHeaderAr = Subj(7)
                 Case 11: NotefHeaderAr = Subj(8)
             End Select
-        Case 4 ' Serie 33 (10)
+        Case 4
             Select Case j
                 Case 1:  NotefHeaderAr = Subj(13)
                 Case 2:  NotefHeaderAr = Subj(14)
@@ -553,7 +597,7 @@ Private Function NotefHeaderAr(ByVal k As Long, ByVal j As Long) As String
                 Case 9:  NotefHeaderAr = Subj(7)
                 Case 10: NotefHeaderAr = Subj(8)
             End Select
-        Case 5 ' Serie 34 (10)
+        Case 5
             Select Case j
                 Case 1:  NotefHeaderAr = Subj(6)
                 Case 2:  NotefHeaderAr = Subj(14)
@@ -566,7 +610,7 @@ Private Function NotefHeaderAr(ByVal k As Long, ByVal j As Long) As String
                 Case 9:  NotefHeaderAr = Subj(7)
                 Case 10: NotefHeaderAr = Subj(8)
             End Select
-        Case 6 ' Serie 35 (10)
+        Case 6
             Select Case j
                 Case 1:  NotefHeaderAr = Subj(15)
                 Case 2:  NotefHeaderAr = Subj(6)
@@ -579,7 +623,7 @@ Private Function NotefHeaderAr(ByVal k As Long, ByVal j As Long) As String
                 Case 9:  NotefHeaderAr = Subj(7)
                 Case 10: NotefHeaderAr = Subj(8)
             End Select
-        Case 7 ' Serie 36 (10)
+        Case 7
             Select Case j
                 Case 1:  NotefHeaderAr = Subj(16)
                 Case 2:  NotefHeaderAr = Subj(6)
@@ -592,7 +636,7 @@ Private Function NotefHeaderAr(ByVal k As Long, ByVal j As Long) As String
                 Case 9:  NotefHeaderAr = Subj(7)
                 Case 10: NotefHeaderAr = Subj(8)
             End Select
-        Case 8 ' Serie 37 (10)
+        Case 8
             Select Case j
                 Case 1:  NotefHeaderAr = Subj(17)
                 Case 2:  NotefHeaderAr = Subj(6)
@@ -605,7 +649,7 @@ Private Function NotefHeaderAr(ByVal k As Long, ByVal j As Long) As String
                 Case 9:  NotefHeaderAr = Subj(7)
                 Case 10: NotefHeaderAr = Subj(8)
             End Select
-        Case 9 ' Serie 38 (10)
+        Case 9
             Select Case j
                 Case 1:  NotefHeaderAr = Subj(18)
                 Case 2:  NotefHeaderAr = Subj(6)
@@ -621,9 +665,6 @@ Private Function NotefHeaderAr(ByVal k As Long, ByVal j As Long) As String
     End Select
 End Function
 
-' ---------------------------------------------------------------------
-'  Header builder (dynamic, based on k)
-' ---------------------------------------------------------------------
 Private Sub BuildHeaders(ByVal k As Long, ByRef hdr() As Variant)
     Dim j As Long, m As Long
     m = SubjectCount(k)
@@ -640,9 +681,6 @@ Private Sub BuildHeaders(ByVal k As Long, ByRef hdr() As Variant)
     hdr(8 + m) = Ar("h_avgme")
 End Sub
 
-' ---------------------------------------------------------------------
-'  Data fill (dynamic, based on k)
-' ---------------------------------------------------------------------
 Private Sub FillData(ByRef data() As Variant, ByRef vals As Variant, ByRef grp() As Byte, ByVal k As Long)
     Dim r As Long, p As Long, j As Long, n As Long, m As Long
     n = UBound(vals, 1)
@@ -661,7 +699,6 @@ Private Sub FillData(ByRef data() As Variant, ByRef vals As Variant, ByRef grp()
             data(p, 8 + m) = vals(r, mNumCols(14))
         End If
     Next r
-    ' Sort by Moyenne (descending), THEN number column A
     SortByAvgDesc data, p, 7 + m
 End Sub
 
@@ -672,7 +709,6 @@ Private Function AvgKey(ByVal v As Variant) As Double
     AvgKey = CDbl(v)
 End Function
 
-' Stable descending sort on column avgCol, then fills column 1 with 1..n
 Private Sub SortByAvgDesc(ByRef data() As Variant, ByVal n As Long, ByVal avgCol As Long)
     Dim key() As Double, idx() As Long, tmp() As Variant
     Dim i As Long, j As Long, c As Long, t As Long, nc As Long
@@ -775,9 +811,6 @@ Private Function SeriesSheetName(ByVal k As Long) As String
     SeriesSheetName = CStr(Choose(k, "Philo", "LaEtr", "GeEc", "SE", "Math", "TGM", "TGE", "TGC", "TGP"))
 End Function
 
-' ---------------------------------------------------------------------
-'  Sheet builder (dynamic nCols)
-' ---------------------------------------------------------------------
 Private Sub BuildSheet(ByVal ws As Worksheet, ByVal k As Long, ByRef data() As Variant, ByVal n As Long, _
                        ByRef hdr() As Variant, ByVal yearText As String)
     Dim LastRow As Long, area As Range, lo As ListObject, nCols As Long
@@ -817,7 +850,7 @@ Private Sub BuildSheet(ByVal ws As Worksheet, ByVal k As Long, ByRef data() As V
         .Font.Name = mFontNum: .Font.Size = 15
     End With
 
-    Set lo = ws.ListObjects.Add(SourceType:=xlSrcRange, source:=area, XlListObjectHasHeaders:=xlYes)
+    Set lo = ws.ListObjects.Add(SourceType:=xlSrcRange, Source:=area, XlListObjectHasHeaders:=xlYes)
     lo.Name = "T_" & ws.Name
     lo.TableStyle = "": lo.ShowTotals = False
     lo.ShowTableStyleRowStripes = False: lo.ShowTableStyleColumnStripes = False: lo.ShowAutoFilter = True
@@ -835,7 +868,7 @@ Private Sub BuildSheet(ByVal ws As Worksheet, ByVal k As Long, ByRef data() As V
     ws.Rows(TITLE_ROW).RowHeight = TITLE_ROW_HEIGHT
     With ws.Range("B1:F1")
         .Merge
-        .Value2 = Ar("title_main") & " " & yearText
+        .Value2 = Ar("title_main") & IIf(Len(yearText) > 0, " " & yearText, "")
     End With
     With ws.Range("H1:L1")
         .Merge
@@ -861,8 +894,6 @@ Private Function LastDataCol(ByVal ws As Worksheet) As Long
     LastDataCol = ws.Cells(HEADER_ROW, ws.Columns.Count).End(xlToLeft).Column
 End Function
 
-' Widths/heights applied last so nothing earlier can override them.
-' Whole columns / whole rows; cell content is irrelevant.
 Private Sub ApplyLayout(ByVal ws As Worksheet, ByVal nCols As Long)
     If nCols < 4 Then Exit Sub
     ws.Columns(1).ColumnWidth = ID_COL_WIDTH
@@ -872,7 +903,6 @@ Private Sub ApplyLayout(ByVal ws As Worksheet, ByVal nCols As Long)
     ws.Rows(HEADER_ROW).RowHeight = HEADER_ROW_HEIGHT
 End Sub
 
-' Reads the values back (Excel snaps to whole pixels, hence the tolerance).
 Private Function CheckLayout(ByVal ws As Worksheet, ByVal nCols As Long) As String
     Dim c As Long, s As String
     If Abs(ws.Columns(1).ColumnWidth - ID_COL_WIDTH) > 0.2 Then
@@ -903,9 +933,6 @@ Private Sub StyleBanner(ByVal rng As Range)
     End With
 End Sub
 
-' ---------------------------------------------------------------------
-'  Fonts
-' ---------------------------------------------------------------------
 Private Sub ResolveFonts(ByVal ws As Worksheet)
     mFontNotes = ""
     mFontBase = PickFont(ws, FONT_BASE, FONT_SAFE_TEXT)
@@ -963,11 +990,12 @@ Private Function MeasureWidth(ByVal ws As Worksheet, ByVal fontName As String, B
     MeasureWidth = ws.Columns(1).ColumnWidth
 End Function
 
-' ---------------------------------------------------------------------
-'  Files
-' ---------------------------------------------------------------------
 Private Function FileExists(ByVal fullPath As String) As Boolean
-    FileExists = (Len(Dir$(fullPath, vbNormal Or vbReadOnly Or vbHidden Or vbSystem Or vbArchive)) > 0)
+    Dim fso As Object
+    On Error Resume Next
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    FileExists = fso.FileExists(fullPath)
+    If Err.Number <> 0 Then FileExists = False: Err.Clear
 End Function
 
 Private Function PathInUse(ByVal fullPath As String) As Boolean
@@ -986,8 +1014,9 @@ End Function
 
 Private Function NewOutputPath(ByVal folder As String, ByVal stem As String) As String
     Dim fullPath As String, n As Long
+    If Right$(folder, 1) = Application.PathSeparator Then folder = Left$(folder, Len(folder) - 1)
     fullPath = folder & Application.PathSeparator & stem & ".xlsx"
-    n = 1
+    n = 0
     Do While PathInUse(fullPath)
         n = n + 1
         fullPath = folder & Application.PathSeparator & stem & "_" & Format$(n, "00") & ".xlsx"
@@ -995,9 +1024,6 @@ Private Function NewOutputPath(ByVal folder As String, ByVal stem As String) As 
     NewOutputPath = fullPath
 End Function
 
-' ---------------------------------------------------------------------
-'  Arabic text
-' ---------------------------------------------------------------------
 Private Function ArHex(ByVal codes As String) As String
     Dim token As Variant
     For Each token In Split(codes, " ")
@@ -1007,31 +1033,33 @@ End Function
 
 Private Function Ar(ByVal key As String) As String
     Select Case key
+    Case "prefix": Ar = ArHex("62A 62D 644 64A 644 20 646 62A 627 626 62C")
     Case "app_title": Ar = ArHex("646 62A 627 626 62C 20 627 644 628 643 627 644 648 631 64A 627")
     Case "ask_prompt": Ar = ArHex("64A 631 62C 649 20 625 62F 62E 627 644 20 643 648 62F 20 627 644 645 624 633 633 629")
     Case "err_digits": Ar = ArHex("627 644 643 648 62F 20 64A 62A 643 648 646 20 645 646 20 623 631 642 627 645 20 641 642 637")
     Case "working": Ar = ArHex("62C 627 631 64D 20 627 644 62A 62D 636 64A 631 3A")
-    Case "save_tool": Ar = ArHex("627 62D 641 638 20 645 644 641 20 627 644 623 62F 627 629 20 623 648 644 627 64B 20 641 64A 20 627 644 645 62C 644 62F 20 646 641 633 647 20 627 644 630 64A 20 64A 62D 62A 648 64A 20 639 644 649 20 645 644 641 20 627 644 646 62A 627 626 62C 2E")
-    Case "no_source": Ar = ArHex("644 645 20 623 62C 62F 20 645 644 641 20 627 644 646 62A 627 626 62C 20 628 62C 627 646 628 20 645 644 641 20 627 644 623 62F 627 629 2E 20 627 644 627 633 645 20 627 644 645 637 644 648 628 3A")
+    Case "save_tool": Ar = ArHex("627 62D 641 638 20 645 644 641 20 627 644 623 62F 627 629 20 623 648 644 627 64B 20 641 64A 20 645 62C 644 62F 60C 20 62B 645 20 636 639 20 645 62C 644 62F 20 627 644 645 635 62F 631 20 628 62C 627 646 628 647 2E")
+    Case "no_src_folder": Ar = ArHex("645 62C 644 62F 20 627 644 645 635 62F 631 627 634 20 645 641 64A 64E 651 644 20 627 644 645 635 62F 631 3A")
+    Case "no_source": Ar = ArHex("644 645 20 623 62C 62F 20 645 644 641 20 627 644 646 62A 627 626 62C 20 628 62C 627 646 628 20 645 644 641 20 627 644 623 62F 627 629 2E 20 627 644 627 633 645 627 644 645 637 644 648 628 3A")
     Case "same_name_open": Ar = ArHex("64A 648 62C 62F 20 645 644 641 20 628 627 644 627 633 645 20 646 641 633 647 20 645 641 62A 648 62D 20 645 646 20 645 62C 644 62F 20 622 62E 631 2E 20 623 63A 644 642 647 20 62B 645 20 623 639 62F 20 627 644 645 62D 627 648 644 629 3A")
     Case "missing_source": Ar = ArHex("645 644 641 20 627 644 646 62A 627 626 62C 20 63A 64A 631 20 645 648 62C 648 62F 3A")
     Case "no_sheet": Ar = ArHex("644 645 20 623 62C 62F 20 648 631 642 629 20 628 64A 627 646 627 62A 20 62A 62D 62A 648 64A 20 639 644 649 20 627 644 639 645 648 62F 64A 646 3A")
-    Case "bad_headers": Ar = ArHex("62A 639 630 631 20 627 644 639 62B 648 631 20 639 644 649 20 647 630 647 20 627 644 623 639 645 62F 629 20 641 64A 20 648 631 642 629 20 627 644 628 64A 627 646 627 62A 3A")
-    Case "no_rows": Ar = ArHex("648 631 642 629 20 627 644 628 64A 627 646 627 62A 20 644 627 20 62A 62D 62A 648 64A 20 639 644 649 20 623 64A 20 635 641 2E")
-    Case "not_found": Ar = ArHex("644 627 20 62A 648 62C 62F 20 646 62A 627 626 62C 20 644 647 630 627 20 627 644 643 648 62F 20 641 64A 20 627 644 645 644 641")
-    Case "other_series": Ar = ArHex("648 64F 62C 62F 20 627 644 643 648 62F 20 644 643 646 20 631 645 632 20 627 644 634 639 628 629 20 62E 627 631 62C 20 627 644 645 62C 627 644 20 627 644 645 633 645 648 62D")
-    Case "too_many_rows": Ar = ArHex("639 62F 62F 20 627 644 635 641 648 641 20 64A 62A 62C 627 648 632 20 633 639 629 20 627 644 648 631 642 629 3A")
-    Case "layout_warn": Ar = ArHex("62A 646 628 64A 647 3A 20 62A 639 630 631 20 636 628 637 20 627 644 623 628 639 627 62F 20 627 644 62A 627 644 64A 629 20 643 645 627 20 647 648 20 645 637 644 648 628 3A")
+    Case "bad_headers": Ar = ArHex("62A 639 630 631 20 627 644 639 62B 648 631 639 644 649 647 630 647 627 644 623 639 645 62F 629 641 64A 648 631 642 629 627 644 628 64A 627 646 627 62A 3A")
+    Case "no_rows": Ar = ArHex("648 631 642 629 20 627 644 628 64A 627 646 627 62A 20 644 627 20 62A 62D 62A 648 64A 639 644 649 23 623 64A 635 641 2E")
+    Case "not_found": Ar = ArHex("644 645 20 62A 648 62C 62F 646 62A 627 626 62C 644 647 630 627 627 644 643 648 62F 641 64A 627 644 645 644 641")
+    Case "other_series": Ar = ArHex("648 64F 62C 62F 20 627 644 643 648 62F 644 646 631 645 632 627 644 634 639 628 629 62E 627 631 62C 627 644 645 62C 627 644 627 644 645 633 645 648 62D")
+    Case "too_many_rows": Ar = ArHex("639 62F 62F 627 644 635 641 648 641 64A 62A 62C 627 648 632 633 639 629 627 644 648 631 642 629 3A")
+    Case "layout_warn": Ar = ArHex("62A 646 628 64A 647 3A 20 62A 639 630 631 636 628 637 627 644 623 628 639 627 62F 627 644 62A 627 644 64A 629 643 645 627 647 648 645 637 644 648 628 3A")
     Case "done": Ar = ArHex("62A 645 20 625 646 634 627 621 20 627 644 645 644 641 3A")
     Case "sheets": Ar = ArHex("639 62F 62F 20 627 644 623 648 631 627 642")
     Case "pupils": Ar = ArHex("639 62F 62F 20 627 644 62A 644 627 645 64A 630")
-    Case "save_chk": Ar = ArHex("62A 639 630 651 631 20 627 644 62A 62D 642 642 20 645 646 20 648 62C 648 62F 20 645 644 641 20 627 644 646 62A 627 626 62C 20 628 639 62F")
-        Ar = Ar & ArHex("20 627 644 62D 641 638 3A")
+    Case "save_chk": Ar = ArHex("62A 639 630 651 631 20 627 644 62A 62D 642 642 20 645 646 20 648 62C 648 62F 20 645 644 641 20 627 644 646 62A 627 626 62C 20 628 639 62F 627 644 62D 641 638 3A")
     Case "st_cancel": Ar = ArHex("623 644 63A 649 20 627 644 645 633 62A 62E 62F 645 20 627 644 639 645 644 64A 629 2E")
     Case "failed": Ar = ArHex("62A 639 630 631 20 625 646 634 627 621 20 627 644 645 644 641 3A")
     Case "fonts": Ar = ArHex("62A 645 20 627 633 62A 628 62F 627 644 20 62E 637 648 637 20 63A 64A 631 20 645 62A 648 641 631 629 20 628 62E 637 648 637 20 628 62F 64A 644 629 3A")
     Case "title_main": Ar = ArHex("646 62A 627 626 62C 20 634 647 627 62F 629 20 627 644 628 643 627 644 648 631 64A 627")
     Case "branch_word": Ar = ArHex("634 639 628 629")
+    Case "no_out_folder": Ar = ArHex("62A 639 630 631 20 625 646 634 627 621 20 645 62C 644 62F 627 629 20 627 644 625 635 62F 631 627 634 2E")
     Case "h_num": Ar = ArHex("627 644 631 642 645")
     Case "h_name": Ar = ArHex("627 644 644 642 628 20 648 627 644 627 633 645")
     Case "h_birth": Ar = ArHex("62A 627 631 64A 62E 20 627 644 645 64A 644 627 62F")

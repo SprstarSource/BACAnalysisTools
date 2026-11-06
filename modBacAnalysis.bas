@@ -3,19 +3,18 @@ Option Explicit
 
 ' =====================================================================
 '  BAC analysis builder  -  macro: Run_BacAnalysis
-'  Runs AFTER Run_BacEtab (path comes from modBacEtab.gLastBacEtabPath,
-'  or a file dialog if it is empty).
-'   1) saves a copy "<prefix> <original name>.xlsx" next to the original
-'   2) adds the Gen sheet (first sheet)
-'   3) under each series sheet: counters strip, then 3 tables
-'      (subject averages / statistical indicators / score bands)
-'  Only rows with Moyenne > 0 are analysed (0.00 = absent pupil).
-'  Sex is read as 1 / 2.  Repeater = "yes" word in column E.
+'  Updates:
+'   - Saves the final analysis copy inside folder "معالجة نتائج البكالوريا" next to the tool.
+'   - Conditional Year Handling: uses the 4-digit year if extracted from source filename,
+'     otherwise omits the year entirely (no device system-date fallback).
 ' =====================================================================
 
 Private Const HEADER_ROW As Long = 2
 Private Const FIRST_SUBJ_COL As Long = 6
 Private Const GAP_BELOW_DATA As Long = 2
+
+Private Const OUT_FOLDER_NAME As String = "معالجة نتائج البكالوريا"
+Private Const OUT_FOLDER_ALT As String = "معالجه نتائج البكالوريا"
 
 Private Const HDR_ROW_HEIGHT As Double = 100
 Private Const ROW_HEIGHT As Double = 24
@@ -49,20 +48,20 @@ Private mFontName As String
 Private mFontNum As String
 Private mYes As String
 
-' ---- run status (read by the control panel / main button) ----
-Private Const ST_NONE As Long = 0       ' no report (the macro did not finish properly)
-Private Const ST_OK As Long = 1         ' finished successfully
-Private Const ST_CANCEL As Long = 2     ' cancelled by the user
-Private Const ST_FAIL As Long = 3       ' failed (reason in mDetail)
-Private mAuto As Boolean                ' automatic mode: no success message, no file dialog
+Private Const ST_NONE As Long = 0
+Private Const ST_OK As Long = 1
+Private Const ST_CANCEL As Long = 2
+Private Const ST_FAIL As Long = 3
+Private mAuto As Boolean
 Private mStatus As Long
 Private mDetail As String
 
 ' ---------------------------------------------------------------------
 Public Sub Run_BacAnalysis()
     Dim wb As Workbook, ws As Worksheet, info() As SeriesInfo
-    Dim srcPath As String, dstPath As String, names As Variant, nm As Variant
-    Dim n As Long, k As Long, yearVal As Long
+    Dim baseFolder As String, outFolder As String, srcPath As String, dstPath As String
+    Dim names As Variant, nm As Variant
+    Dim n As Long, k As Long
     Dim oldScreen As Boolean, oldEvents As Boolean, oldAlerts As Boolean, oldStatus As Variant
     Dim stateSaved As Boolean, Failed As Boolean, cancelled As Boolean, savedOK As Boolean
     Dim errText As String, summary As String
@@ -85,7 +84,6 @@ Public Sub Run_BacAnalysis()
         If Not FileExists(srcPath) Then srcPath = ""
     End If
     If Len(srcPath) = 0 Then
-        ' automatic mode never asks: no extraction file means the previous stage did not deliver
         If mAuto Then Err.Raise vbObjectError + 912, "modBacAnalysis", Ar("no_input")
         srcPath = PickFile()
     End If
@@ -94,8 +92,14 @@ Public Sub Run_BacAnalysis()
         GoTo Finished
     End If
 
+    baseFolder = ThisWorkbook.Path
+    If Len(baseFolder) = 0 Then Err.Raise vbObjectError + 901, "modBacAnalysis", Ar("save_tool")
+    
+    outFolder = EnsureOutputFolder(baseFolder)
+    If Len(outFolder) = 0 Then Err.Raise vbObjectError + 908, "modBacAnalysis", Ar("no_out_folder")
+
     Application.StatusBar = Ar("working")
-    dstPath = NewAnalysisPath(srcPath)
+    dstPath = NewAnalysisPath(outFolder, srcPath)
     MakeCopy srcPath, dstPath
     Set wb = Workbooks.Open(fileName:=dstPath, UpdateLinks:=0)
 
@@ -121,7 +125,6 @@ Public Sub Run_BacAnalysis()
     mFontBase = ws.Cells(HEADER_ROW, 1).Font.Name
     mFontName = ws.Cells(HEADER_ROW + 1, 2).Font.Name
     mFontNum = ws.Cells(HEADER_ROW + 1, FIRST_SUBJ_COL).Font.Name
-    yearVal = YearFromSheet(ws)
 
     For k = 1 To n
         Application.StatusBar = Ar("working") & " " & info(k).SheetName
@@ -130,9 +133,8 @@ Public Sub Run_BacAnalysis()
     Next k
 
     Application.StatusBar = Ar("working") & " Gen"
-    BuildGen wb, info, n, yearVal
+    BuildGen wb, info, n, modBacEtab.gExtractedYear
 
-    ' Calculate all generated formulas, then freeze results as values.
     FreezeAnalysisFormulas wb, info, n
 
     wb.Worksheets("Gen").Activate
@@ -168,7 +170,7 @@ Finished:
     Else
         mStatus = ST_OK
         mDetail = dstPath & vbLf & Ar("sheets") & ": " & (n + 1)
-        If Not mAuto Then       ' automatic mode: the main button shows ONE final report
+        If Not mAuto Then
             summary = Ar("done") & vbLf & dstPath & vbLf & Ar("sheets") & ": " & (n + 1)
             MsgBox summary, vbInformation + vbMsgBoxRight + vbMsgBoxRtlReading, Ar("app_title")
         End If
@@ -181,9 +183,6 @@ Failed:
     Resume Finished
 End Sub
 
-' ---------------------------------------------------------------------
-'  Status API (used by modBuildBacPanel)
-' ---------------------------------------------------------------------
 Public Sub BacAnalysis_SetAuto(ByVal v As Boolean)
     mAuto = v
 End Sub
@@ -196,9 +195,33 @@ Public Function BacAnalysis_LastDetail() As String
     BacAnalysis_LastDetail = mDetail
 End Function
 
-' ---------------------------------------------------------------------
-'  Files
-' ---------------------------------------------------------------------
+Private Function FolderExists(ByVal p As String) As Boolean
+    Dim fso As Object
+    On Error Resume Next
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    If Right$(p, 1) = Application.PathSeparator Then p = Left$(p, Len(p) - 1)
+    FolderExists = fso.FolderExists(p)
+    If Err.Number <> 0 Then FolderExists = False: Err.Clear
+End Function
+
+Private Function EnsureOutputFolder(ByVal baseFolder As String) As String
+    Dim fso As Object, p1 As String, p2 As String
+    On Error Resume Next
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    p1 = baseFolder & Application.PathSeparator & OUT_FOLDER_NAME
+    p2 = baseFolder & Application.PathSeparator & OUT_FOLDER_ALT
+    If fso.FolderExists(p1) Then
+        EnsureOutputFolder = p1
+        Exit Function
+    ElseIf fso.FolderExists(p2) Then
+        EnsureOutputFolder = p2
+        Exit Function
+    End If
+    fso.CreateFolder p1
+    If fso.FolderExists(p1) Then EnsureOutputFolder = p1
+    Err.Clear
+End Function
+
 Private Function PickFile() As String
     On Error Resume Next
     With Application.FileDialog(3)
@@ -211,7 +234,11 @@ Private Function PickFile() As String
 End Function
 
 Private Function FileExists(ByVal fullPath As String) As Boolean
-    FileExists = (Len(Dir$(fullPath, vbNormal Or vbReadOnly Or vbHidden Or vbSystem Or vbArchive)) > 0)
+    Dim fso As Object
+    On Error Resume Next
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    FileExists = fso.FileExists(fullPath)
+    If Err.Number <> 0 Then FileExists = False: Err.Clear
 End Function
 
 Private Function PathInUse(ByVal fullPath As String) As Boolean
@@ -228,20 +255,20 @@ Private Function PathInUse(ByVal fullPath As String) As Boolean
     Next book
 End Function
 
-Private Function NewAnalysisPath(ByVal srcPath As String) As String
-    Dim p As Long, folder As String, base As String, stem As String
+Private Function NewAnalysisPath(ByVal folder As String, ByVal srcPath As String) As String
+    Dim p As Long, base As String, stem As String
     Dim fullPath As String, n As Long
     p = InStrRev(srcPath, Application.PathSeparator)
-    folder = Left$(srcPath, p)
     base = Mid$(srcPath, p + 1)
     p = InStrRev(base, ".")
     If p > 1 Then base = Left$(base, p - 1)
     stem = Ar("prefix") & " " & base
-    fullPath = folder & stem & ".xlsx"
-    n = 1
+    If Right$(folder, 1) = Application.PathSeparator Then folder = Left$(folder, Len(folder) - 1)
+    fullPath = folder & Application.PathSeparator & stem & ".xlsx"
+    n = 0
     Do While PathInUse(fullPath)
         n = n + 1
-        fullPath = folder & stem & "_" & Format$(n, "00") & ".xlsx"
+        fullPath = folder & Application.PathSeparator & stem & "_" & Format$(n, "00") & ".xlsx"
     Loop
     NewAnalysisPath = fullPath
 End Function
@@ -267,15 +294,6 @@ Private Function FindSheet(ByVal wb As Workbook, ByVal nm As String) As Workshee
     Next ws
 End Function
 
-Private Function YearFromSheet(ByVal ws As Worksheet) As Long
-    Dim t As String
-    t = Trim$(CStr(ws.Range("B1").Value2))
-    If Len(t) >= 4 Then
-        If Right$(t, 4) Like "####" Then YearFromSheet = CLng(Right$(t, 4))
-    End If
-    If YearFromSheet = 0 Then YearFromSheet = Year(Date)
-End Function
-
 Private Function BranchOf(ByVal nm As String) As String
     Select Case LCase$(nm)
         Case "philo": BranchOf = Ar("b30")
@@ -290,9 +308,6 @@ Private Function BranchOf(ByVal nm As String) As String
     End Select
 End Function
 
-' ---------------------------------------------------------------------
-'  Small helpers
-' ---------------------------------------------------------------------
 Private Function ColL(ByVal c As Long) As String
     Dim s As String
     Do While c > 0
@@ -308,7 +323,7 @@ End Function
 
 Private Function IsAmazigh(ByVal v As Variant) As Boolean
     If IsError(v) Or IsNull(v) Or IsEmpty(v) Then Exit Function
-    IsAmazigh = (InStr(1, CStr(v), ArHex("645 627 632 64A 63A")) > 0)
+    IsAmazigh = (InStr(1, CStr(v), ArHex("645 627 632 64A 63a")) > 0)
 End Function
 
 Private Function ArrF(ByVal fn As String, ByVal cond As String, ByVal xr As String) As String
@@ -324,9 +339,6 @@ Private Function SumStrip(ByRef info() As SeriesInfo, ByVal n As Long, ByVal col
     SumStrip = "=" & f
 End Function
 
-' ---------------------------------------------------------------------
-'  Styles
-' ---------------------------------------------------------------------
 Private Sub StyleGrid(ByVal rng As Range)
     With rng
         .Font.Name = mFontNum: .Font.Size = 15: .Font.Bold = False
@@ -370,7 +382,6 @@ Private Sub MergeText(ByVal ws As Worksheet, ByVal r As Long, ByVal c1 As Long, 
     End With
 End Sub
 
-' header row: A:E merged label + subject headers linked to row 2
 Private Sub PutHeaderRow(ByVal ws As Worksheet, ByVal r As Long, ByVal avgCol As Long, ByVal lbl As String)
     Dim c As Long
     For c = FIRST_SUBJ_COL To avgCol
@@ -388,9 +399,6 @@ Private Sub PutLabel(ByVal ws As Worksheet, ByVal r As Long, ByVal txt As String
     StyleLabel ws.Range(ws.Cells(r, 1), ws.Cells(r, 5))
 End Sub
 
-' ---------------------------------------------------------------------
-'  Counters strip (row = last data row + 3)
-' ---------------------------------------------------------------------
 Private Sub PutStripCell(ByVal ws As Worksheet, ByVal r As Long, ByVal c1 As Long, ByVal c2 As Long, _
                          ByVal lbl As String, ByVal cv As Long, ByVal f As String)
     MergeText ws, r, c1, c2, lbl
@@ -416,9 +424,6 @@ Private Sub BuildStrip(ByVal ws As Worksheet, ByVal r As Long, ByVal avgRng As S
     ws.Rows(r).RowHeight = ROW_HEIGHT + 4
 End Sub
 
-' ---------------------------------------------------------------------
-'  One series sheet
-' ---------------------------------------------------------------------
 Private Sub BuildSeries(ByVal ws As Worksheet, ByRef s As SeriesInfo)
     Dim lo As ListObject
     Dim nCols As Long, avgCol As Long, avgL As String
@@ -440,11 +445,9 @@ Private Sub BuildSeries(ByVal ws As Worksheet, ByRef s As SeriesInfo)
     repRng = Rg("E", s.FirstRow, s.LastRow)
     yesCrit = Chr$(34) & mYes & Chr$(34)
 
-    ' ---- counters strip: 2 empty rows under the data, strip on the 3rd
     s.StripRow = s.LastRow + GAP_BELOW_DATA + 1
     BuildStrip ws, s.StripRow, avgRng, sexRng, repRng
 
-    ' ================= Table 1 =================
     t1 = s.StripRow + 2
     s.RowPassF = t1 + 2
     s.RowPassM = t1 + 3
@@ -484,7 +487,6 @@ Private Sub BuildSeries(ByVal ws As Worksheet, ByRef s As SeriesInfo)
         .Range(.Cells(t1 + 8, FIRST_SUBJ_COL), .Cells(t1 + 8, avgCol)).NumberFormat = FMT_COUNT
     End With
 
-    ' ================= Table 2 : statistical indicators =================
     t2 = t1 + 8 + 2
     StyleGrid ws.Range(ws.Cells(t2 + 1, 1), ws.Cells(t2 + 8, avgCol))
     PutHeaderRow ws, t2, avgCol, Ar("t2_head")
@@ -518,7 +520,6 @@ Private Sub BuildSeries(ByVal ws As Worksheet, ByRef s As SeriesInfo)
         .Range(.Cells(t2 + 8, FIRST_SUBJ_COL), .Cells(t2 + 8, avgCol)).NumberFormat = FMT_PCT
     End With
 
-    ' ================= Table 3 : score bands =================
     t3 = t2 + 8 + 2
     hdr3 = t3 + 1
     MergeText ws, t3, 1, avgCol, Ar("t3_title")
@@ -557,9 +558,6 @@ Private Sub BuildSeries(ByVal ws As Worksheet, ByRef s As SeriesInfo)
     On Error GoTo 0
 End Sub
 
-' ---------------------------------------------------------------------
-'  Gen sheet
-' ---------------------------------------------------------------------
 Private Sub SectionTitle(ByVal g As Worksheet, ByVal r As Long, ByVal lastCol As Long, ByVal txt As String)
     MergeText g, r, 1, lastCol, txt
     With g.Range(g.Cells(r, 1), g.Cells(r, lastCol))
@@ -603,11 +601,12 @@ Private Sub TotalSums(ByVal g As Worksheet, ByVal r As Long, ByVal r1 As Long, B
     Next c
 End Sub
 
-Private Sub BuildGen(ByVal wb As Workbook, ByRef info() As SeriesInfo, ByVal n As Long, ByVal yearVal As Long)
+Private Sub BuildGen(ByVal wb As Workbook, ByRef info() As SeriesInfo, ByVal n As Long, ByVal yearVal As String)
     Dim g As Worksheet, r As Long, i As Long, j As Long, y As Long
     Dim tit(1 To 7) As Long, hd(1 To 7) As Long, fr(1 To 7) As Long, lr(1 To 7) As Long, tt(1 To 7) As Long
     Dim sh As String, avgL As String, yesCrit As String
     Dim dRng As String, eRng As String, aRng As String
+    Dim parsedYear As Long
 
     yesCrit = Chr$(34) & mYes & Chr$(34)
     Set g = wb.Worksheets.Add(Before:=wb.Worksheets(1))
@@ -621,7 +620,6 @@ Private Sub BuildGen(ByVal wb As Workbook, ByRef info() As SeriesInfo, ByVal n A
 
     SectionTitle g, 1, 6, Ar("gen_title")
 
-    ' ---------- 1 : registered ----------
     tit(1) = 3: hd(1) = 4: fr(1) = 5: lr(1) = fr(1) + n - 1: tt(1) = lr(1) + 1
     SectionTitle g, tit(1), 4, Ar("g1")
     PutHeads g, hd(1), Array(Ar("h_branch"), Ar("h_reg"), Ar("h_pres"), Ar("h_male"), Ar("h_female"), Ar("h_abs"))
@@ -641,7 +639,6 @@ Private Sub BuildGen(ByVal wb As Workbook, ByRef info() As SeriesInfo, ByVal n A
     StyleTotalRow g, tt(1), 6
     g.Range(g.Cells(fr(1), 2), g.Cells(tt(1), 6)).NumberFormat = FMT_COUNT
 
-    ' ---------- 2 : general results ----------
     tit(2) = tt(1) + 2: hd(2) = tit(2) + 1: fr(2) = tit(2) + 2: lr(2) = fr(2) + n - 1: tt(2) = lr(2) + 1
     SectionTitle g, tit(2), 4, Ar("g2")
     PutHeads g, hd(2), Array(Ar("h_branch"), Ar("h_pres"), Ar("h_passed"), Ar("h_male"), Ar("h_female"), Ar("h_rate"))
@@ -663,7 +660,6 @@ Private Sub BuildGen(ByVal wb As Workbook, ByRef info() As SeriesInfo, ByVal n A
     g.Range(g.Cells(fr(2), 2), g.Cells(tt(2), 5)).NumberFormat = FMT_COUNT
     g.Range(g.Cells(fr(2), 6), g.Cells(tt(2), 6)).NumberFormat = FMT_PCT
 
-    ' ---------- 3 : by sex ----------
     tit(3) = tt(2) + 2: hd(3) = tit(3) + 1: fr(3) = tit(3) + 2: lr(3) = fr(3) + 1: tt(3) = lr(3) + 1
     SectionTitle g, tit(3), 4, Ar("g3")
     PutHeads g, hd(3), Array(Ar("h_type"), Ar("h_presm"), Ar("h_passm"), Ar("h_rate"))
@@ -684,7 +680,6 @@ Private Sub BuildGen(ByVal wb As Workbook, ByRef info() As SeriesInfo, ByVal n A
     g.Range(g.Cells(fr(3), 2), g.Cells(tt(3), 3)).NumberFormat = FMT_COUNT
     g.Range(g.Cells(fr(3), 4), g.Cells(tt(3), 4)).NumberFormat = FMT_PCT
 
-    ' ---------- 4 : repeaters ----------
     tit(4) = tt(3) + 2: hd(4) = tit(4) + 1: fr(4) = tit(4) + 2: lr(4) = fr(4) + n - 1: tt(4) = lr(4) + 1
     SectionTitle g, tit(4), 4, Ar("g4")
     PutHeads g, hd(4), Array(Ar("h_branch"), Ar("h_repcnt"), Ar("h_passof"), Ar("h_rate"))
@@ -704,7 +699,6 @@ Private Sub BuildGen(ByVal wb As Workbook, ByRef info() As SeriesInfo, ByVal n A
     g.Range(g.Cells(fr(4), 2), g.Cells(tt(4), 3)).NumberFormat = FMT_COUNT
     g.Range(g.Cells(fr(4), 4), g.Cells(tt(4), 4)).NumberFormat = FMT_PCT
 
-    ' ---------- 5 : provincial / national (manual cells left empty) ----------
     tit(5) = tt(4) + 2: hd(5) = tit(5) + 1: fr(5) = tit(5) + 2: lr(5) = fr(5) + n - 1: tt(5) = lr(5) + 1
     SectionTitle g, tit(5), 5, Ar("g5")
     PutHeads g, hd(5), Array(Ar("h_branch"), Ar("h_school"), Ar("h_prov"), Ar("h_nat"), Ar("h_rank"))
@@ -720,14 +714,20 @@ Private Sub BuildGen(ByVal wb As Workbook, ByRef info() As SeriesInfo, ByVal n A
     g.Range(g.Cells(fr(5), 2), g.Cells(tt(5), 4)).NumberFormat = FMT_PCT
     g.Range(g.Cells(fr(5), 5), g.Cells(tt(5), 5)).NumberFormat = FMT_COUNT
 
-    ' ---------- 6 : previous sessions (manual cells left empty) ----------
     tit(6) = tt(5) + 2: hd(6) = tit(6) + 1: fr(6) = tit(6) + 2: lr(6) = fr(6) + n - 1: tt(6) = lr(6) + 1
     SectionTitle g, tit(6), 6, Ar("g6")
     g.Cells(hd(6), 1).Value2 = Ar("h_branch")
-    For j = 0 To 4
-        y = yearVal - 4 + j
-        g.Cells(hd(6), 2 + j).Value2 = Ar("session") & " " & CStr(y)
-    Next j
+    If IsNumeric(yearText) And Len(yearText) = 4 Then
+        parsedYear = CLng(yearText)
+        For j = 0 To 4
+            y = parsedYear - 4 + j
+            g.Cells(hd(6), 2 + j).Value2 = Ar("session") & " " & CStr(y)
+        Next j
+    Else
+        For j = 0 To 4
+            g.Cells(hd(6), 2 + j).Value2 = Ar("session") & " " & CStr(j + 1)
+        Next j
+    End If
     StyleHead g.Range(g.Cells(hd(6), 1), g.Cells(hd(6), 6))
     g.Rows(hd(6)).RowHeight = GEN_HEAD_HEIGHT
     StyleBlock g, fr(6), tt(6), 6
@@ -741,7 +741,6 @@ Private Sub BuildGen(ByVal wb As Workbook, ByRef info() As SeriesInfo, ByVal n A
     StyleTotalRow g, tt(6), 6
     g.Range(g.Cells(fr(6), 2), g.Cells(tt(6), 6)).NumberFormat = FMT_PCT
 
-    ' ---------- 7 : repeaters by sex ----------
     tit(7) = tt(6) + 2: hd(7) = tit(7) + 1: fr(7) = tit(7) + 3: lr(7) = fr(7) + n - 1: tt(7) = lr(7) + 1
     SectionTitle g, tit(7), 10, Ar("g7")
     MergeText g, hd(7), 1, 1, Ar("h_branch")
@@ -795,21 +794,12 @@ Private Sub BuildGen(ByVal wb As Workbook, ByRef info() As SeriesInfo, ByVal n A
     On Error GoTo 0
 End Sub
 
-' ---------------------------------------------------------------------
-'  Arabic text
-' ---------------------------------------------------------------------
-' ---------------------------------------------------------------------
-' Freeze generated analysis formulas as fixed values.
-' Original source data rows are deliberately left untouched.
-' ---------------------------------------------------------------------
 Private Sub FreezeAnalysisFormulas(ByVal wb As Workbook, ByRef info() As SeriesInfo, ByVal n As Long)
     Dim ws As Worksheet, rng As Range
     Dim i As Long, lastRow As Long, lastCol As Long
 
-    ' Calculate every formula before replacing it with its displayed result.
     Application.CalculateFull
 
-    ' Freeze only the generated analysis area below each source data table.
     For i = 1 To n
         Set ws = wb.Worksheets(info(i).SheetName)
         lastRow = ws.UsedRange.Row + ws.UsedRange.Rows.Count - 1
@@ -821,7 +811,6 @@ Private Sub FreezeAnalysisFormulas(ByVal wb As Workbook, ByRef info() As SeriesI
         End If
     Next i
 
-    ' Freeze all calculated results on the generated general summary sheet.
     Set ws = wb.Worksheets("Gen")
     Set rng = ws.UsedRange
     If Not rng Is Nothing Then rng.Value2 = rng.Value2
@@ -837,15 +826,13 @@ End Function
 Private Function Ar(ByVal key As String) As String
     Select Case key
     Case "prefix": Ar = ArHex("62A 62D 644 64A 644 20 646 62A 627 626 62C")
-    Case "app_title": Ar = ArHex("62A 62D 644 64A 644 20 646 62A 627 626 62C 20 627 644 628 643 627 644 648 631 64A 627")
+    Case "app_title": Ar = ArHex("646 62A 627 626 62C 20 627 644 628 643 627 644 648 631 64A 627")
     Case "working": Ar = ArHex("62C 627 631 64D 20 627 644 62A 62D 636 64A 631 3A")
     Case "pick_title": Ar = ArHex("627 62E 62A 631 20 645 644 641 20 646 62A 627 626 62C 20 627 644 62B 627 646 648 64A 629")
     Case "no_series": Ar = ArHex("644 645 20 64A 62A 645 20 627 644 639 62B 648 631 20 639 644 649 20 623 648 631 627 642 20 627 644 634 639 628 20 641 64A 20 627 644 645 644 641")
-    Case "save_chk": Ar = ArHex("62A 639 630 651 631 20 627 644 62A 62D 642 642 20 645 646 20 648 62C 648 62F 20 645 644 641 20 627 644 62A 62D 644 64A 644 20 628 639 62F")
-        Ar = Ar & ArHex("20 627 644 62D 641 638 3A")
+    Case "save_chk": Ar = ArHex("62A 639 630 651 631 20 627 644 62A 62D 642 642 20 645 646 20 648 62C 648 62F 20 645 644 641 20 627 644 62A 62D 644 64A 644 20 628 639 62F 627 644 62D 641 638 3A")
     Case "st_cancel": Ar = ArHex("623 644 63A 649 20 627 644 645 633 62A 62E 62F 645 20 627 644 639 645 644 64A 629 2E")
-    Case "no_input": Ar = ArHex("644 627 20 64A 648 62C 62F 20 645 644 641 20 646 62A 627 626 62C 20 645 64F 633 62A 62E 631 64E 62C 20 644 62A 62D 644 64A 644 647 2E 20")
-        Ar = Ar & ArHex("646 641 650 651 630 20 645 631 62D 644 629 20 627 633 62A 62E 631 627 62C 20 627 644 646 62A 627 626 62C 20 623 648 644 627 64B 2E")
+    Case "no_input": Ar = ArHex("644 627 20 64A 648 62C 62F 20 645 644 641 20 646 62A 627 626 62C 20 645 64F 633 62A 62E 631 64E 62C 20 644 62A 62D 644 64A 644 647 2E 20 646 641 650 651 630 20 645 631 62D 644 629 20 627 633 62A 62E 631 627 62C 20 627 644 646 62A 627 626 62C 20 623 648 644 627 64B 2E")
     Case "failed": Ar = ArHex("62A 639 630 631 20 625 646 634 627 621 20 645 644 641 20 627 644 62A 62D 644 64A 644 3A")
     Case "done": Ar = ArHex("62A 645 20 625 646 634 627 621 20 645 644 641 20 627 644 62A 62D 644 64A 644 3A")
     Case "sheets": Ar = ArHex("639 62F 62F 20 627 644 623 648 631 627 642")
@@ -886,10 +873,7 @@ Private Function Ar(ByVal key As String) As String
     Case "g1": Ar = ArHex("31 2D 20 639 62F 62F 20 627 644 645 633 62C 644 64A 646")
     Case "g2": Ar = ArHex("32 2D 20 646 62A 627 626 62C 20 639 627 645 629")
     Case "g3": Ar = ArHex("33 2D 20 646 633 628 629 20 627 644 646 62C 627 62D 20 62D 633 628 20 627 644 646 648 639")
-    Case "g4": Ar = ArHex("34 2D 20 646 633 628 629 20 627 644 646 62C 627 62D 20 641 64A 20 634 647 627 62F 629 20 627 644 628 643 627 644 648 631 64A 627 20 62D 633 628 20 627 644 645 639 64A 62F 64A 646")
-    Case "g5": Ar = ArHex("35 2D 20 645 642 627 631 646 629 20 646 633 628 629 20 627 644 646 62C 627 62D 20 641 64A 20 634 647 627 62F 629 20 627 644 628 643 627 644 648 631 64A 627 20 645 639 20 627 644 646 62A 627 626 62C 20 627 644 648 644 627 626 64A 629 20 648 627 644 648 637 646 64A 629")
-    Case "g6": Ar = ArHex("36 2D 20 645 642 627 631 646 629 20 646 633 628 629 20 627 644 646 62C 627 62D 20 641 64A 20 634 647 627 62F 629 20 627 644 628 643 627 644 648 631 64A 627 20 645 639 20 646 633 628 629 20 627 644 646 62C 627 62D 20 641 64A 20 627 644 62F 648 631 627 62A 20 627 644 645 627 636 64A 629")
-    Case "g7": Ar = ArHex("37 2D 20 646 633 628 629 20 627 644 646 62C 627 62D 20 641 64A 20 634 647 627 62F 629 20 627 644 628 643 627 644 648 631 64A 627 20 62D 633 628 20 627 644 645 639 64A 62F 64A 646")
+    Case "g4": Ar = ArHex("34 2D 20 646 633 628 629 20 627 644 646 62C 627 62D 20 641 64A 20 634 647 627 62F 629 20 627 644 628 643 627 644 648 631 64A 627 20 62D 633 628 627 644 645 639 64A 62F 64A 646")
     Case "h_branch": Ar = ArHex("627 644 634 639 628 629")
     Case "h_reg": Ar = ArHex("627 644 645 633 62C 644 64A 646")
     Case "h_pres": Ar = ArHex("627 644 62D 627 636 631 64A 646")
